@@ -1,0 +1,271 @@
+"use client";
+
+import Image from "next/image";
+import { useEffect, useRef, useState } from "react";
+
+import { VerificationResults } from "@/components/verification-results";
+import type { VerificationResult } from "@/types/verification";
+
+const ACCEPTED_IMAGE_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+].join(",");
+
+export default function Home() {
+  const [englishName, setEnglishName] = useState("");
+  const [countryHint, setCountryHint] = useState("");
+  const [documentTypeHint, setDocumentTypeHint] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [result, setResult] = useState<VerificationResult | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!imageFile) {
+      setPreviewUrl("");
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(imageFile);
+    setPreviewUrl(objectUrl);
+
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageFile]);
+
+  useEffect(() => {
+    if (result) {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result]);
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setErrorMessage("");
+
+    if (!englishName.trim()) {
+      setErrorMessage("영문 이름을 먼저 입력해주세요.");
+      return;
+    }
+
+    if (!imageFile) {
+      setErrorMessage("신분증 이미지를 먼저 업로드해주세요.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setResult(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("englishName", englishName.trim());
+      formData.append("countryHint", countryHint.trim());
+      formData.append("documentTypeHint", documentTypeHint.trim());
+      formData.append("image", imageFile);
+
+      const response = await fetch("/api/verify-id", {
+        method: "POST",
+        body: formData,
+      });
+
+      const payload = (await response.json()) as
+        | VerificationResult
+        | { error?: string };
+
+      if (!response.ok) {
+        throw new Error(payload && "error" in payload ? payload.error : "검증에 실패했습니다.");
+      }
+
+      setResult(payload as VerificationResult);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "신분증 검증 중 문제가 발생했습니다.",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="relative isolate overflow-hidden">
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-[26rem] bg-[radial-gradient(circle_at_top_left,_rgba(23,124,104,0.23),_transparent_58%),radial-gradient(circle_at_top_right,_rgba(220,112,53,0.2),_transparent_48%)]" />
+
+      <section className="mx-auto w-full max-w-7xl px-5 py-8 sm:px-8 sm:py-12 lg:px-10 lg:py-16">
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,1.2fr)_23rem]">
+          <div>
+            <div className="max-w-3xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.32em] text-teal-700">
+                Server-side OCR verification
+              </p>
+              <h1 className="mt-4 text-4xl font-semibold leading-tight text-stone-950 sm:text-5xl">
+                ID name match verification with OCR, romanization, and review-ready confidence.
+              </h1>
+              <p className="mt-5 max-w-2xl text-base leading-8 text-stone-700 sm:text-lg">
+                Upload an ID image, compare the extracted romanized name against the user-entered
+                English name, and surface exact, likely, possible, mismatch, or manual-review
+                outcomes from a single screen.
+              </p>
+            </div>
+
+            <form
+              onSubmit={handleSubmit}
+              className="mt-8 rounded-[2rem] border border-stone-200/80 bg-white/85 p-6 shadow-[0_28px_80px_rgba(34,31,23,0.08)] backdrop-blur"
+            >
+              <div className="grid gap-6 lg:grid-cols-2">
+                <FormField
+                  label="User Entered English Full Name"
+                  description="Required. This is the name that will be matched against OCR + romanization output."
+                >
+                  <input
+                    value={englishName}
+                    onChange={(event) => setEnglishName(event.target.value)}
+                    placeholder="Giljung Kim"
+                    className={inputClassName}
+                    autoComplete="off"
+                  />
+                </FormField>
+
+                <FormField
+                  label="ID Image Upload"
+                  description="Required. Upload one photo or scan of the ID document."
+                >
+                  <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-[1.4rem] border border-dashed border-stone-300 bg-stone-50 px-4 py-5 text-center transition hover:border-teal-500 hover:bg-teal-50/60">
+                    <span className="text-sm font-semibold text-stone-800">
+                      {imageFile ? imageFile.name : "Choose an image file"}
+                    </span>
+                    <span className="mt-2 text-xs leading-6 text-stone-500">
+                      JPG, PNG, WEBP, HEIC up to 8MB
+                    </span>
+                    <input
+                      type="file"
+                      accept={ACCEPTED_IMAGE_TYPES}
+                      className="sr-only"
+                      onChange={(event) => {
+                        const nextFile = event.target.files?.[0] ?? null;
+                        setImageFile(nextFile);
+                      }}
+                    />
+                  </label>
+                </FormField>
+
+                <FormField
+                  label="Country hint"
+                  description="Optional. Helps if you already know the issuing country."
+                >
+                  <input
+                    value={countryHint}
+                    onChange={(event) => setCountryHint(event.target.value)}
+                    placeholder="KR"
+                    className={inputClassName}
+                    autoComplete="off"
+                  />
+                </FormField>
+
+                <FormField
+                  label="Document type hint"
+                  description="Optional. Example: passport, national ID, residence card."
+                >
+                  <input
+                    value={documentTypeHint}
+                    onChange={(event) => setDocumentTypeHint(event.target.value)}
+                    placeholder="Passport"
+                    className={inputClassName}
+                    autoComplete="off"
+                  />
+                </FormField>
+              </div>
+
+              <div className="mt-6 flex flex-wrap items-center gap-4">
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="inline-flex min-h-12 items-center justify-center rounded-full bg-stone-950 px-6 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-stone-400"
+                >
+                  {isSubmitting ? "Validating..." : "Validate"}
+                </button>
+                <p className="text-sm text-stone-500">
+                  OpenAI API is called only from the server route. The browser never receives the API key.
+                </p>
+              </div>
+
+              {errorMessage ? (
+                <div className="mt-5 rounded-[1.25rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm leading-7 text-rose-900">
+                  {errorMessage}
+                </div>
+              ) : null}
+            </form>
+          </div>
+
+          <aside className="space-y-6">
+            <section className="rounded-[1.8rem] border border-stone-200/80 bg-white/82 p-5 shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
+                Preview
+              </p>
+              <div className="mt-4 overflow-hidden rounded-[1.5rem] border border-stone-200 bg-stone-100">
+                {previewUrl ? (
+                  <div className="relative h-72 w-full">
+                    <Image
+                      src={previewUrl}
+                      alt="Selected ID preview"
+                      fill
+                      unoptimized
+                      className="object-cover"
+                    />
+                  </div>
+                ) : (
+                  <div className="flex h-72 items-center justify-center px-6 text-center text-sm leading-7 text-stone-500">
+                    Upload an ID image to see the preview here.
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-[1.8rem] border border-stone-200/80 bg-white/82 p-5 shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
+                Security
+              </p>
+              <div className="mt-4 space-y-3 text-sm leading-7 text-stone-700">
+                <p>Local development keeps the real key in the project root <code>.env.local</code>.</p>
+                <p>Production deployment should move the same key into Vercel Environment Variables.</p>
+                <p>GitHub stores code only. The API key must never be committed.</p>
+              </div>
+            </section>
+          </aside>
+        </div>
+
+        <div ref={resultsRef} className="mt-10">
+          {result ? <VerificationResults result={result} /> : null}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function FormField({
+  children,
+  description,
+  label,
+}: {
+  children: React.ReactNode;
+  description: string;
+  label: string;
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm font-semibold text-stone-900">{label}</span>
+      <p className="mt-1 text-sm leading-6 text-stone-500">{description}</p>
+      <div className="mt-3">{children}</div>
+    </label>
+  );
+}
+
+const inputClassName =
+  "w-full rounded-[1.2rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition placeholder:text-stone-400 focus:border-teal-500 focus:bg-white focus:ring-4 focus:ring-teal-100";
