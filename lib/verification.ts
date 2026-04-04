@@ -34,6 +34,12 @@ export class VerificationError extends Error {
   }
 }
 
+interface OpenAIStyleError extends Error {
+  status?: number;
+  code?: string | null;
+  type?: string | null;
+}
+
 interface VerifyIdInput {
   englishName: string;
   countryHint: string;
@@ -223,7 +229,7 @@ function validateInputs({
   if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
     throw new VerificationError(
       400,
-      "JPG, PNG, WEBP, HEIC 이미지 파일만 업로드해주세요.",
+      "JPG, PNG, WEBP, HEIC 형식의 이미지 파일만 업로드할 수 있습니다.",
       `Unsupported file type: ${file.type}`,
     );
   }
@@ -286,7 +292,11 @@ async function extractWithOpenAI({
       });
 
       if (!response.output_parsed) {
-        throw new Error("OpenAI returned no parsed output.");
+        throw new VerificationError(
+          502,
+          "OpenAI가 응답은 반환했지만 결과를 구조화해서 읽지 못했습니다. 잠시 후 다시 시도해주세요.",
+          "OpenAI returned no parsed output.",
+        );
       }
 
       return response.output_parsed;
@@ -299,11 +309,7 @@ async function extractWithOpenAI({
     }
   }
 
-  throw new VerificationError(
-    502,
-    "신분증 이미지를 분석하는 중 문제가 발생했습니다. 잠시 후 다시 시도해주세요.",
-    lastError instanceof Error ? lastError.message : "OpenAI extraction failed.",
-  );
+  throw mapOpenAIError(lastError, modelCandidates);
 }
 
 function buildUserPrompt({
@@ -525,4 +531,202 @@ function isRetriableModelError(error: unknown) {
       message.includes("permission") ||
       message.includes("access"))
   );
+}
+
+function mapOpenAIError(error: unknown, attemptedModels: string[]) {
+  if (error instanceof VerificationError) {
+    return error;
+  }
+
+  if (!(error instanceof Error)) {
+    return new VerificationError(
+      502,
+      "신분증 이미지를 분석하는 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+      "Unknown OpenAI error.",
+    );
+  }
+
+  const openAiError = error as OpenAIStyleError;
+  const status = openAiError.status ?? 0;
+  const code = String(openAiError.code ?? "").trim();
+  const type = String(openAiError.type ?? "").trim();
+  const message = error.message.toLowerCase();
+  const attemptedModelSummary = attemptedModels.join(", ");
+
+  if (message.includes("openai_api_key")) {
+    return new VerificationError(
+      500,
+      "서버에 OpenAI API 키가 설정되지 않았습니다. `.env.local` 또는 Vercel 환경 변수를 확인해주세요.",
+      error.message,
+    );
+  }
+
+  if (
+    status === 401 ||
+    code === "invalid_api_key" ||
+    code === "incorrect_api_key_provided" ||
+    type === "authentication_error" ||
+    message.includes("invalid api key") ||
+    message.includes("incorrect api key") ||
+    message.includes("authentication")
+  ) {
+    return new VerificationError(
+      401,
+      `OpenAI API 키가 올바르지 않거나 만료되었습니다. 키 값을 다시 확인해주세요.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 429 &&
+    (code === "insufficient_quota" ||
+      code === "billing_hard_limit_reached" ||
+      message.includes("quota") ||
+      message.includes("billing"))
+  ) {
+    return new VerificationError(
+      429,
+      `OpenAI 크레딧 또는 결제 한도가 부족합니다. OpenAI Billing/Usage를 확인해주세요.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (status === 429) {
+    return new VerificationError(
+      429,
+      `OpenAI 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 403 ||
+    code === "permission_denied" ||
+    message.includes("does not have access") ||
+    message.includes("permission") ||
+    message.includes("not allowed")
+  ) {
+    return new VerificationError(
+      403,
+      `현재 OpenAI 계정에서 필요한 모델에 접근할 수 없습니다. 모델 권한 또는 프로젝트 설정을 확인해주세요. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 404 ||
+    code === "model_not_found" ||
+    (message.includes("model") && message.includes("not found"))
+  ) {
+    return new VerificationError(
+      404,
+      `요청한 OpenAI 모델을 찾을 수 없습니다. \`OPENAI_MODEL\` 설정 또는 계정에서 사용 가능한 모델을 확인해주세요. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 400 &&
+    (code.includes("image") ||
+      message.includes("image") ||
+      message.includes("unsupported file") ||
+      message.includes("invalid image") ||
+      message.includes("input_image"))
+  ) {
+    return new VerificationError(
+      400,
+      `업로드한 이미지 형식 또는 이미지 데이터에 문제가 있어 분석하지 못했습니다. 다른 이미지로 다시 시도해주세요.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 400 &&
+    (message.includes("content policy") ||
+      code === "content_policy_violation")
+  ) {
+    return new VerificationError(
+      400,
+      `OpenAI 정책 검사에 의해 요청이 차단되었습니다.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status === 400 &&
+    (message.includes("max_output_tokens") ||
+      message.includes("response_format") ||
+      message.includes("schema") ||
+      message.includes("json"))
+  ) {
+    return new VerificationError(
+      500,
+      `서버의 OpenAI 요청 설정에 문제가 있습니다. 관리자 확인이 필요합니다.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  if (
+    status >= 500 ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("fetch failed") ||
+    message.includes("network")
+  ) {
+    return new VerificationError(
+      502,
+      `OpenAI 서버 응답이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
+        status,
+        code,
+      )}`,
+      error.message,
+    );
+  }
+
+  return new VerificationError(
+    status >= 400 && status < 600 ? status : 502,
+    `신분증 이미지를 분석하는 중 OpenAI 요청이 실패했습니다. 설정 또는 입력 이미지를 다시 확인해주세요.${formatDetailSuffix(
+      status,
+      code,
+    )}`,
+    error.message,
+  );
+}
+
+function formatDetailSuffix(status: number, code: string) {
+  const details: string[] = [];
+
+  if (status) {
+    details.push(`status ${status}`);
+  }
+
+  if (code) {
+    details.push(`code ${code}`);
+  }
+
+  return details.length ? ` (${details.join(", ")})` : "";
 }
