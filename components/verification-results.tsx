@@ -14,7 +14,7 @@ const toneClasses: Record<ConfidenceTone, string> = {
 };
 
 const rowBaseClass =
-  "grid gap-3 rounded-[1.35rem] border border-stone-200/70 bg-white/85 p-4 shadow-[0_16px_40px_rgba(36,33,25,0.06)] sm:grid-cols-[1.2fr_1.7fr_auto]";
+  "grid gap-3 rounded-[1.1rem] border border-stone-200/70 bg-white/85 p-3.5 shadow-[0_14px_34px_rgba(36,33,25,0.06)] sm:grid-cols-[1.2fr_1.7fr_auto] sm:rounded-[1.35rem] sm:p-4 sm:shadow-[0_16px_40px_rgba(36,33,25,0.06)]";
 
 export function VerificationResults({ result }: { result: VerificationResult }) {
   const detailRows = [
@@ -81,22 +81,22 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
   return (
     <div className="space-y-6">
       {result.manual_review_required ? (
-        <div className="rounded-[1.5rem] border border-amber-300/80 bg-amber-100/90 p-4 text-sm text-amber-950 shadow-[0_18px_40px_rgba(193,137,40,0.12)]">
+        <div className="rounded-[1.2rem] border border-amber-300/80 bg-amber-100/90 p-4 text-sm text-amber-950 shadow-[0_18px_40px_rgba(193,137,40,0.12)] sm:rounded-[1.5rem]">
           Manual review is recommended. One or more extracted fields remain uncertain.
         </div>
       ) : null}
 
-      <section className="rounded-[2rem] border border-stone-200/80 bg-white/88 p-6 shadow-[0_28px_70px_rgba(34,31,23,0.08)]">
-        <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+      <section className="rounded-[1.6rem] border border-stone-200/80 bg-white/88 p-4 shadow-[0_22px_54px_rgba(34,31,23,0.08)] sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_70px_rgba(34,31,23,0.08)]">
+        <div className="mb-4 flex flex-col items-start gap-3 sm:mb-5 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-teal-700">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-teal-700 sm:text-xs sm:tracking-[0.28em]">
               Name Match Verdict
             </p>
-            <h2 className="mt-2 text-2xl font-semibold text-stone-950 sm:text-3xl">
+            <h2 className="mt-2 break-words text-xl font-semibold text-stone-950 sm:text-3xl">
               {getMatchLabel(result.name_match_result)}
             </h2>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto">
             <StatusBadge tone={matchTone}>{getMatchLabel(result.name_match_result)}</StatusBadge>
             <StatusBadge tone={getConfidenceTone(result.name_match_confidence)}>
               {getConfidenceLabel(result.name_match_confidence)} {formatConfidence(result.name_match_confidence)}
@@ -117,7 +117,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           />
         </div>
 
-        <div className="mt-5 rounded-[1.5rem] border border-stone-200/70 bg-stone-50/90 p-4">
+        <div className="mt-4 rounded-[1.2rem] border border-stone-200/70 bg-stone-50/90 p-4 sm:mt-5 sm:rounded-[1.5rem]">
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-stone-500">
             Alternatives
           </p>
@@ -139,7 +139,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           </div>
         </div>
 
-        <div className="mt-5 rounded-[1.5rem] border border-stone-200/70 bg-teal-50/80 p-4">
+        <div className="mt-4 rounded-[1.2rem] border border-stone-200/70 bg-teal-50/80 p-4 sm:mt-5 sm:rounded-[1.5rem]">
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-700">
             Reason
           </p>
@@ -149,9 +149,9 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
         </div>
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+      <section className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr] lg:gap-6">
         <div className="space-y-6">
-          <article className="rounded-[1.8rem] border border-stone-200/70 bg-white/88 p-6 shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
+          <article className="rounded-[1.4rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6 sm:shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
@@ -170,7 +170,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
               {result.document_quality_notes}
             </p>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <div className="mt-4 grid gap-3 sm:mt-5 sm:grid-cols-2">
               <MiniMetric
                 label="Country detected"
                 value={result.country_detected || "Unknown"}
@@ -182,7 +182,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
             </div>
           </article>
 
-          <article className="rounded-[1.8rem] border border-stone-200/70 bg-white/88 p-6 shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
+          <article className="rounded-[1.4rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6 sm:shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
@@ -197,7 +197,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
               </StatusBadge>
             </div>
 
-            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <div className="mt-4 grid gap-3 sm:mt-5 sm:grid-cols-2">
               <MiniMetric
                 label="Name match"
                 value={formatConfidence(result.name_match_confidence)}
@@ -210,7 +210,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           </article>
         </div>
 
-        <article className="rounded-[1.8rem] border border-stone-200/70 bg-white/88 p-6 shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
+        <article className="rounded-[1.4rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6 sm:shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
@@ -222,7 +222,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
             </div>
           </div>
 
-          <div className="mt-5 space-y-3">
+          <div className="mt-4 space-y-3 sm:mt-5">
             {detailRows.map((row) => (
               <div key={row.label} className={rowBaseClass}>
                 <div>
@@ -249,14 +249,14 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
         </article>
       </section>
 
-      <section className="rounded-[1.8rem] border border-stone-200/70 bg-white/88 p-6 shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
+      <section className="rounded-[1.4rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6 sm:shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
           Warnings
         </p>
         <h3 className="mt-2 text-xl font-semibold text-stone-950">
           Review notes
         </h3>
-        <div className="mt-5 space-y-3">
+        <div className="mt-4 space-y-3 sm:mt-5">
           {result.warnings.length ? (
             result.warnings.map((warning) => (
               <div
@@ -286,7 +286,7 @@ function StatusBadge({
 }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${toneClasses[tone]}`}
+      className={`inline-flex max-w-full items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] sm:text-xs sm:tracking-[0.18em] ${toneClasses[tone]}`}
     >
       {children}
     </span>
@@ -303,11 +303,11 @@ function InfoCard({
   body: string;
 }) {
   return (
-    <div className="rounded-[1.5rem] border border-stone-200/70 bg-stone-50/90 p-4">
+    <div className="rounded-[1.2rem] border border-stone-200/70 bg-stone-50/90 p-4 sm:rounded-[1.5rem]">
       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-stone-500">
         {eyebrow}
       </p>
-      <p className="mt-2 text-lg font-semibold text-stone-950">{title}</p>
+      <p className="mt-2 break-words text-base font-semibold text-stone-950 sm:text-lg">{title}</p>
       <p className="mt-2 text-sm leading-7 text-stone-600">{body}</p>
     </div>
   );
@@ -315,11 +315,11 @@ function InfoCard({
 
 function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-[1.3rem] border border-stone-200/70 bg-stone-50/90 p-4">
+    <div className="rounded-[1.1rem] border border-stone-200/70 bg-stone-50/90 p-4 sm:rounded-[1.3rem]">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-500">
         {label}
       </p>
-      <p className="mt-2 text-sm font-semibold text-stone-900">{value}</p>
+      <p className="mt-2 break-words text-sm font-semibold text-stone-900">{value}</p>
     </div>
   );
 }
