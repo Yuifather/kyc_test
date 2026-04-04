@@ -16,8 +16,6 @@ const ACCEPTED_IMAGE_TYPES = [
 
 export default function Home() {
   const [englishName, setEnglishName] = useState("");
-  const [countryHint, setCountryHint] = useState("");
-  const [documentTypeHint, setDocumentTypeHint] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [result, setResult] = useState<VerificationResult | null>(null);
@@ -65,8 +63,6 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("englishName", englishName.trim());
-      formData.append("countryHint", countryHint.trim());
-      formData.append("documentTypeHint", documentTypeHint.trim());
       formData.append("image", imageFile);
 
       const response = await fetch("/api/verify-id", {
@@ -119,7 +115,7 @@ export default function Home() {
               onSubmit={handleSubmit}
               className="mt-5 rounded-[1.7rem] border border-stone-200/80 bg-white/85 p-4 shadow-[0_20px_60px_rgba(34,31,23,0.08)] backdrop-blur sm:mt-8 sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_80px_rgba(34,31,23,0.08)]"
             >
-              <div className="grid gap-6 lg:grid-cols-2">
+              <div className="grid gap-6 md:grid-cols-2">
                 <FormField
                   label="User Entered English Full Name"
                   description="Required. This is the name that will be matched against OCR + romanization output."
@@ -154,32 +150,6 @@ export default function Home() {
                       }}
                     />
                   </label>
-                </FormField>
-
-                <FormField
-                  label="Country hint"
-                  description="Optional. Helps if you already know the issuing country."
-                >
-                  <input
-                    value={countryHint}
-                    onChange={(event) => setCountryHint(event.target.value)}
-                    placeholder="KR"
-                    className={inputClassName}
-                    autoComplete="off"
-                  />
-                </FormField>
-
-                <FormField
-                  label="Document type hint"
-                  description="Optional. Example: passport, national ID, residence card."
-                >
-                  <input
-                    value={documentTypeHint}
-                    onChange={(event) => setDocumentTypeHint(event.target.value)}
-                    placeholder="Passport"
-                    className={inputClassName}
-                    autoComplete="off"
-                  />
                 </FormField>
               </div>
 
