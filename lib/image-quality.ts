@@ -18,7 +18,7 @@ export function inspectImageQuality(
     width = dimensions.width ?? 0;
     height = dimensions.height ?? 0;
   } catch {
-    notes.push("Local dimension check could not read the image metadata.");
+    notes.push("로컬 이미지 크기 점검에서 메타데이터를 읽지 못했습니다.");
     confidence -= 0.08;
   }
 
@@ -29,23 +29,23 @@ export function inspectImageQuality(
 
     if (shortestSide < 700) {
       confidence -= 0.25;
-      notes.push("The image resolution is low for OCR.");
-      warnings.push("Low resolution may reduce OCR reliability.");
+      notes.push("이미지 해상도가 낮아 OCR 정확도에 불리합니다.");
+      warnings.push("해상도가 낮아 OCR 신뢰도가 떨어질 수 있습니다.");
     } else if (shortestSide < 1000) {
       confidence -= 0.12;
-      notes.push("The image resolution is modest and may reduce extraction quality.");
+      notes.push("이미지 해상도가 충분히 높지 않아 추출 품질이 낮아질 수 있습니다.");
     }
 
     if (aspectRatio > 2.4) {
       confidence -= 0.12;
-      notes.push("The image aspect ratio is unusual for a document capture.");
-      warnings.push("Document framing looks narrow or cropped.");
+      notes.push("문서 촬영치고는 이미지 비율이 비정상적입니다.");
+      warnings.push("문서 프레이밍이 좁거나 일부가 잘렸을 수 있습니다.");
     }
   }
 
   if (fileSize < 80 * 1024) {
     confidence -= 0.08;
-    notes.push("The uploaded file is very small, which can indicate aggressive compression.");
+    notes.push("업로드한 파일 크기가 매우 작아 과도한 압축이 있었을 가능성이 있습니다.");
   }
 
   return {

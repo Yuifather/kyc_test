@@ -78,6 +78,8 @@ Rules:
 - local_full_name should preserve the original local-script full name when visible.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
 - If name order is ambiguous, explain it in romanization_notes.
+- Write explanatory text fields such as document_quality_notes, gender_notes, romanization_notes, and warnings in Korean.
+- Keep normalized data values such as document_type, issued_country, romanized names, and dates in their required output format.
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
 - The first image is always the front side. When a second image is provided, treat it as the back side of the same document.
@@ -100,6 +102,8 @@ Rules:
 - postal_code must only be returned when it is explicitly visible on the document. Never infer or guess it from the address.
 - local_full_address should preserve the original OCR address string when visible.
 - address_notes should explain any segmentation ambiguity.
+- Write explanatory text fields such as document_quality_notes, address_notes, and warnings in Korean.
+- Keep normalized data values such as document_type, issued_country, country/state/city/address fields, and dates in their required output format.
 - For Japanese addresses:
   - country should be JAPAN.
   - state should be prefecture only.
@@ -189,7 +193,7 @@ export async function verifyPoiDocument({
     ...buildPoiWarnings(cleaned, {
       documentQualityConfidence,
       genderWasHeldBack: !gender.gender,
-      nameMatchReason: nameMatch.reason,
+      nameMatchRequiresReview: nameMatch.result === "manual_review",
     }),
   ]);
 
@@ -229,7 +233,7 @@ export async function verifyPoiDocument({
     document_quality_notes:
       uniqueStrings([cleaned.document_quality_notes, ...localImageQuality.notes]).join(
         " ",
-      ) || "No additional image-quality issues were detected by the local heuristic.",
+      ) || "로컬 품질 점검 기준에서 추가 이미지 품질 이슈는 감지되지 않았습니다.",
     first_name: cleaned.first_name,
     local_first_name: cleaned.local_first_name,
     first_name_confidence: cleaned.first_name_confidence,
@@ -360,7 +364,7 @@ export async function verifyPorDocument({
     document_quality_notes:
       uniqueStrings([cleaned.document_quality_notes, ...localImageQuality.notes]).join(
         " ",
-      ) || "No additional image-quality issues were detected by the local heuristic.",
+      ) || "로컬 품질 점검 기준에서 추가 이미지 품질 이슈는 감지되지 않았습니다.",
     country: cleaned.country,
     local_country: cleaned.local_country,
     country_confidence: cleaned.country_confidence,
@@ -405,7 +409,7 @@ function validatePoiInputs({
   if (!englishName.trim()) {
     throw new VerificationError(
       400,
-      "Enter the user's English full name.",
+      "고객 영문 성명을 입력해주세요.",
       "English name is required.",
     );
   }
@@ -413,7 +417,7 @@ function validatePoiInputs({
   if (!documentTypeHint.trim()) {
     throw new VerificationError(
       400,
-      "Select the document type.",
+      "Document type을 선택해주세요.",
       "Document type is required.",
     );
   }
@@ -421,7 +425,7 @@ function validatePoiInputs({
   if (!countryHint.trim()) {
     throw new VerificationError(
       400,
-      "Select the issued country.",
+      "Issued country를 선택해주세요.",
       "Issued country is required.",
     );
   }
@@ -441,7 +445,7 @@ function validatePorInputs({
   if (!documentTypeHint.trim()) {
     throw new VerificationError(
       400,
-      "Select the document type.",
+      "Document type을 선택해주세요.",
       "Document type is required.",
     );
   }
@@ -449,7 +453,7 @@ function validatePorInputs({
   if (!countryHint.trim()) {
     throw new VerificationError(
       400,
-      "Select the issued country.",
+      "Issued country를 선택해주세요.",
       "Issued country is required.",
     );
   }
@@ -461,7 +465,7 @@ function validateImageFile(file: File, side: "front" | "back" | "document") {
   if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
     throw new VerificationError(
       400,
-      `${capitalize(side)} image must be JPG, PNG, WEBP, or HEIC.`,
+      `${capitalize(side)} 이미지 형식은 JPG, PNG, WEBP, HEIC만 가능합니다.`,
       `Unsupported ${side} file type: ${file.type}`,
     );
   }
@@ -469,7 +473,7 @@ function validateImageFile(file: File, side: "front" | "back" | "document") {
   if (file.size > MAX_FILE_SIZE_BYTES) {
     throw new VerificationError(
       400,
-      `${capitalize(side)} image is too large. Use a file up to 8MB.`,
+      `${capitalize(side)} 이미지는 최대 8MB까지 업로드할 수 있습니다.`,
       `${capitalize(side)} file too large: ${file.size}`,
     );
   }
@@ -591,7 +595,7 @@ async function executeOpenAiParse({
       if (!response.output_parsed) {
         throw new VerificationError(
           502,
-          "OpenAI returned a response but it could not be parsed into the expected result shape.",
+          "OpenAI 응답은 받았지만 기대한 결과 형식으로 해석하지 못했습니다.",
           "OpenAI returned no parsed output.",
         );
       }
@@ -733,33 +737,33 @@ function buildPoiWarnings(
   {
     documentQualityConfidence,
     genderWasHeldBack,
-    nameMatchReason,
+    nameMatchRequiresReview,
   }: {
     documentQualityConfidence: number;
     genderWasHeldBack: boolean;
-    nameMatchReason: string;
+    nameMatchRequiresReview: boolean;
   },
 ) {
   const warnings: string[] = [];
 
   if (documentQualityConfidence < 0.55) {
-    warnings.push("Image quality is low; manual review is recommended.");
+    warnings.push("이미지 품질이 낮아 수동 검토가 권장됩니다.");
   }
 
   if (!extraction.romanization_primary_full_name) {
-    warnings.push("The primary romanized full name could not be extracted confidently.");
+    warnings.push("주 영문화 전체 이름을 신뢰도 있게 추출하지 못했습니다.");
   }
 
   if (!extraction.date_of_birth) {
-    warnings.push("Date of birth could not be standardized confidently.");
+    warnings.push("Date of birth를 신뢰도 있게 표준화하지 못했습니다.");
   }
 
   if (genderWasHeldBack) {
-    warnings.push("Gender was withheld because direct OCR evidence was insufficient.");
+    warnings.push("직접적인 OCR 근거가 부족하여 Gender는 비워두었습니다.");
   }
 
-  if (nameMatchReason.toLowerCase().includes("manual review")) {
-    warnings.push("Name comparison requires manual review.");
+  if (nameMatchRequiresReview) {
+    warnings.push("이름 비교 결과는 수동 검토가 필요합니다.");
   }
 
   return warnings;
@@ -780,15 +784,15 @@ function buildPorWarnings(
   const warnings: string[] = [];
 
   if (documentQualityConfidence < 0.55) {
-    warnings.push("Image quality is low; manual review is recommended.");
+    warnings.push("이미지 품질이 낮아 수동 검토가 권장됩니다.");
   }
 
   if (!extraction.country || !extraction.state || !extraction.city || !extraction.address_1) {
-    warnings.push("Core address fields could not be segmented confidently.");
+    warnings.push("핵심 주소 필드를 신뢰도 있게 분리하지 못했습니다.");
   }
 
   if (!hasPostalCode) {
-    warnings.push("Postal code could not be confirmed from OCR or lookup.");
+    warnings.push("OCR 또는 조회 결과로 Postal code를 확인하지 못했습니다.");
   }
 
   if (postalLookupWarning) {
@@ -958,7 +962,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (!(error instanceof Error)) {
     return new VerificationError(
       502,
-      "An unknown OpenAI error occurred while analyzing the document.",
+      "문서 분석 중 알 수 없는 OpenAI 오류가 발생했습니다.",
       "Unknown OpenAI error.",
     );
   }
@@ -973,7 +977,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (message.includes("openai_api_key")) {
     return new VerificationError(
       500,
-      "The server is missing OPENAI_API_KEY. Check .env.local or your deployment environment variables.",
+      "서버에 OPENAI_API_KEY가 설정되어 있지 않습니다. 환경 변수를 확인해주세요.",
       error.message,
     );
   }
@@ -989,7 +993,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       401,
-      `The OpenAI API key is invalid or expired. Check the configured key.${formatDetailSuffix(
+      `OpenAI API 키가 올바르지 않거나 만료되었습니다. 설정된 키를 확인해주세요.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1006,7 +1010,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       429,
-      `OpenAI quota or billing is insufficient. Check OpenAI Billing and Usage.${formatDetailSuffix(
+      `OpenAI 크레딧 또는 결제 한도가 부족합니다. Billing과 Usage를 확인해주세요.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1017,7 +1021,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (status === 429) {
     return new VerificationError(
       429,
-      `OpenAI rate limits were exceeded. Please try again later.${formatDetailSuffix(
+      `OpenAI 호출 한도를 초과했습니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1034,7 +1038,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       403,
-      `The configured OpenAI account cannot access the required model. Attempted models: ${attemptedModelSummary}.${formatDetailSuffix(
+      `현재 OpenAI 계정으로 필요한 모델에 접근할 수 없습니다. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1049,7 +1053,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       404,
-      `The requested OpenAI model was not found. Check OPENAI_MODEL or model access. Attempted models: ${attemptedModelSummary}.${formatDetailSuffix(
+      `요청한 OpenAI 모델을 찾지 못했습니다. OPENAI_MODEL 또는 모델 접근 권한을 확인해주세요. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1067,7 +1071,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       400,
-      `The uploaded image format or image data could not be processed. Try a different image.${formatDetailSuffix(
+      `업로드한 이미지 형식 또는 이미지 데이터에 문제가 있어 처리하지 못했습니다. 다른 이미지를 시도해주세요.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1081,7 +1085,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       400,
-      `The OpenAI request was blocked by content policy.${formatDetailSuffix(
+      `OpenAI 정책에 의해 요청이 차단되었습니다.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1098,7 +1102,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       500,
-      `The server's OpenAI request configuration is invalid and needs to be fixed.${formatDetailSuffix(
+      `서버의 OpenAI 요청 설정이 올바르지 않아 수정이 필요합니다.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1115,7 +1119,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       502,
-      `OpenAI is temporarily unavailable or unstable. Please try again later.${formatDetailSuffix(
+      `OpenAI 서버가 일시적으로 불안정하거나 사용할 수 없습니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -1125,7 +1129,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
 
   return new VerificationError(
     status >= 400 && status < 600 ? status : 502,
-    `OpenAI failed while analyzing the document. Check the request settings and uploaded files.${formatDetailSuffix(
+    `OpenAI 문서 분석 요청이 실패했습니다. 요청 설정과 업로드 파일을 확인해주세요.${formatDetailSuffix(
       status,
       code,
     )}`,

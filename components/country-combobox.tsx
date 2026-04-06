@@ -17,7 +17,7 @@ export function CountryCombobox({
   value,
   onChange,
   className,
-  placeholder = "Search a country",
+  placeholder = "국가를 검색하세요",
 }: CountryComboboxProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
@@ -101,7 +101,7 @@ export function CountryCombobox({
       />
       <button
         type="button"
-        aria-label="Toggle issued country list"
+        aria-label="발급국가 목록 열기"
         onClick={() => {
           setHighlightedIndex(0);
           setIsOpen((current) => !current);
@@ -151,7 +151,7 @@ export function CountryCombobox({
               ))
             ) : (
               <div className="px-4 py-3 text-sm text-stone-500">
-                No matching country was found in the supported list.
+                지원 목록에서 일치하는 국가를 찾지 못했습니다.
               </div>
             )}
           </div>

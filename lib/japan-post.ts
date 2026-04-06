@@ -54,7 +54,7 @@ export async function lookupJapanPostalCode({
       confidence: 0,
       source: "none",
       warning:
-        "Postal code lookup was skipped because the Japanese address could not be segmented clearly enough.",
+        "일본 주소를 충분히 명확하게 분리하지 못해 우편번호 조회를 건너뛰었습니다.",
     };
   }
 
@@ -89,7 +89,7 @@ export async function lookupJapanPostalCode({
       confidence: 0,
       source: "none",
       warning:
-        "Postal code lookup returned multiple Japan Post candidates, so the postal code was left blank.",
+        "Japan Post 조회 결과가 여러 건이라 Postal code는 비워두었습니다.",
     };
   }
 
@@ -98,7 +98,7 @@ export async function lookupJapanPostalCode({
     confidence: 0,
     source: "none",
     warning:
-      "Postal code could not be resolved from the Japan Post dataset using the current address split.",
+      "현재 주소 분리 결과로는 Japan Post 데이터에서 Postal code를 찾지 못했습니다.",
   };
 }
 

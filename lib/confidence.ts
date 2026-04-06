@@ -37,14 +37,14 @@ export function getConfidenceLabel(confidence: number) {
   const tone = getConfidenceTone(confidence);
 
   if (tone === "good") {
-    return "Good";
+    return "높음";
   }
 
   if (tone === "review") {
-    return "Review";
+    return "검토";
   }
 
-  return "Low";
+  return "낮음";
 }
 
 export function formatConfidence(confidence: number) {
@@ -68,15 +68,15 @@ export function getMatchTone(result: MatchResult): ConfidenceTone {
 export function getMatchLabel(result: MatchResult) {
   switch (result) {
     case "exact_match":
-      return "Exact match";
+      return "정확히 일치";
     case "likely_match":
-      return "Likely match";
+      return "거의 일치";
     case "possible_match":
-      return "Possible match";
+      return "가능성 있음";
     case "manual_review":
-      return "Manual review";
+      return "수동 검토";
     case "mismatch":
     default:
-      return "Mismatch";
+      return "불일치";
   }
 }

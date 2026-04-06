@@ -17,7 +17,7 @@ const ACCEPTED_IMAGE_TYPES = [
 ].join(",");
 
 const POI_DOCUMENT_TYPE_OPTIONS = [
-  { value: "", label: "Select..." },
+  { value: "", label: "선택하세요" },
   { value: "Passport", label: "Passport" },
   { value: "ID Card", label: "ID Card" },
   { value: "Driver's License", label: "Driver's License" },
@@ -25,7 +25,7 @@ const POI_DOCUMENT_TYPE_OPTIONS = [
 ];
 
 const POR_DOCUMENT_TYPE_OPTIONS = [
-  { value: "", label: "Select..." },
+  { value: "", label: "선택하세요" },
   {
     value: "Utility bill (e.g. electricity, water, gas, etc.)",
     label: "Utility bill (e.g. electricity water, gas, etc...)",
@@ -60,18 +60,18 @@ const modeCopy: Record<
   }
 > = {
   poi: {
-    eyebrow: "POI verification",
-    title: "Proof of identity OCR with name matching, local-script capture, and review-ready confidence.",
+    eyebrow: "POI 검증",
+    title: "신분증 OCR 결과를 이름 매칭, 로컬 원문 보존, 검토용 신뢰도와 함께 확인합니다.",
     description:
-      "Enter the customer English name, select issuing country and document type, then upload front and optional back images of the identity document.",
-    buttonLabel: "Validate POI",
+      "고객 영문 성명과 발급국가, Document type을 입력한 뒤 신분증 앞면과 선택형 뒷면 이미지를 업로드하세요.",
+    buttonLabel: "POI 검증하기",
   },
   por: {
-    eyebrow: "POR verification",
-    title: "Proof of residence OCR with standardized address parsing and Japan Post postal-code lookup.",
+    eyebrow: "POR 검증",
+    title: "주소지 증명 서류를 OCR로 읽고, 주소를 표준화하며, 필요하면 Japan Post 우편번호 조회까지 수행합니다.",
     description:
-      "Select the issuing country and POR document type, upload the document, and extract both standardized address fields and local OCR text.",
-    buttonLabel: "Validate POR",
+      "발급국가와 POR용 Document type을 선택하고 서류 이미지를 업로드하면 표준화 주소와 로컬 OCR 원문을 함께 추출합니다.",
+    buttonLabel: "POR 검증하기",
   },
 };
 
@@ -119,24 +119,24 @@ export default function Home() {
 
     if (verificationKind === "poi") {
       if (!poiEnglishName.trim()) {
-        setErrorMessage("Enter the user's English full name.");
+        setErrorMessage("고객 영문 성명을 입력해주세요.");
         return;
       }
 
       if (!poiDocumentType) {
-        setErrorMessage("Select the document type.");
+        setErrorMessage("Document type을 선택해주세요.");
         return;
       }
 
       const canonicalIssuedCountry = findCountryOption(poiIssuedCountry);
 
       if (!canonicalIssuedCountry) {
-        setErrorMessage("Select the issued country from the dropdown list.");
+        setErrorMessage("Issued country를 목록에서 선택해주세요.");
         return;
       }
 
       if (!frontImageFile) {
-        setErrorMessage("Upload the front image of the ID.");
+        setErrorMessage("신분증 앞면 이미지를 업로드해주세요.");
         return;
       }
 
@@ -162,19 +162,19 @@ export default function Home() {
     }
 
     if (!porDocumentType) {
-      setErrorMessage("Select the document type.");
+      setErrorMessage("Document type을 선택해주세요.");
       return;
     }
 
     const canonicalIssuedCountry = findCountryOption(porIssuedCountry);
 
     if (!canonicalIssuedCountry) {
-      setErrorMessage("Select the issued country from the dropdown list.");
+      setErrorMessage("Issued country를 목록에서 선택해주세요.");
       return;
     }
 
     if (!porDocumentFile) {
-      setErrorMessage("Upload the POR document image.");
+      setErrorMessage("POR 문서 이미지를 업로드해주세요.");
       return;
     }
 
@@ -212,14 +212,14 @@ export default function Home() {
 
       if (!response.ok) {
         throw new Error(
-          payload && "error" in payload ? payload.error : "Verification failed.",
+          payload && "error" in payload ? payload.error : "검증에 실패했습니다.",
         );
       }
 
       setResult(payload as VerificationResult);
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "A verification error occurred.",
+        error instanceof Error ? error.message : "검증 중 오류가 발생했습니다.",
       );
     } finally {
       setIsSubmitting(false);
@@ -262,15 +262,15 @@ export default function Home() {
                 <ModeCard
                   active={verificationKind === "poi"}
                   eyebrow="POI"
-                  title="Proof of Identity"
-                  description="Customer name, issued country, document type, and front/back identity images."
+                  title="신분증 검증"
+                  description="고객 영문 성명, 발급국가, Document type, 신분증 앞면/뒷면 이미지로 검증합니다."
                   onClick={() => handleKindChange("poi")}
                 />
                 <ModeCard
                   active={verificationKind === "por"}
                   eyebrow="POR"
-                  title="Proof of Residence"
-                  description="Issued country, POR document type, and address-proof upload with postal-code support."
+                  title="주소지 증명 검증"
+                  description="발급국가, POR용 Document type, 주소지 증명 서류 이미지로 검증합니다."
                   onClick={() => handleKindChange("por")}
                 />
               </div>
@@ -331,11 +331,10 @@ export default function Home() {
                   disabled={isSubmitting}
                   className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-stone-950 px-6 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-stone-400 sm:w-auto"
                 >
-                  {isSubmitting ? "Validating..." : activeCopy.buttonLabel}
+                  {isSubmitting ? "검증 중..." : activeCopy.buttonLabel}
                 </button>
                 <p className="text-sm leading-6 text-stone-500">
-                  OpenAI API is called only from the server route. Postal-code lookup
-                  runs on the server as well.
+                  OpenAI API 호출과 우편번호 조회는 모두 서버에서만 처리됩니다.
                 </p>
               </div>
 
@@ -351,45 +350,28 @@ export default function Home() {
             {verificationKind === "poi" ? (
               <>
                 <ImagePreviewCard
-                  title="Front Preview"
-                  description="The required front-side identity image appears here."
+                  title="앞면 미리보기"
+                  description="업로드한 신분증 앞면 이미지가 여기에 표시됩니다."
                   previewUrl={frontPreviewUrl}
                   alt="Selected front ID preview"
                 />
 
                 <ImagePreviewCard
-                  title="Back Preview"
-                  description="The optional reverse-side identity image appears here."
+                  title="뒷면 미리보기"
+                  description="업로드한 신분증 뒷면 이미지가 여기에 표시됩니다."
                   previewUrl={backPreviewUrl}
                   alt="Selected back ID preview"
                 />
               </>
             ) : (
               <ImagePreviewCard
-                title="POR Preview"
-                description="The uploaded proof-of-residence document appears here."
+                title="POR 문서 미리보기"
+                description="업로드한 주소지 증명 서류 이미지가 여기에 표시됩니다."
                 previewUrl={porPreviewUrl}
                 alt="Selected POR document preview"
                 className="sm:col-span-2 lg:col-span-1"
               />
             )}
-
-            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:col-span-2 sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)] lg:col-span-1">
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
-                Security
-              </p>
-              <div className="mt-3 space-y-3 text-sm leading-6 text-stone-700 sm:mt-4 sm:leading-7">
-                <p>
-                  Local development keeps the real key in the project root{" "}
-                  <code>.env.local</code>.
-                </p>
-                <p>
-                  Production deployment should move the same key into Vercel
-                  Environment Variables.
-                </p>
-                <p>GitHub stores code only. The API key must never be committed.</p>
-              </div>
-            </section>
           </aside>
         </div>
 
@@ -428,7 +410,7 @@ function PoiForm({
     <div className="grid gap-6 md:grid-cols-2">
       <FormField
         label="Customer English Full Name"
-        description="Required. This is the user-entered English name used for POI name matching."
+        description="필수 항목입니다. POI 이름 매칭 기준이 되는 고객 영문 성명입니다."
       >
         <input
           value={englishName}
@@ -441,7 +423,7 @@ function PoiForm({
 
       <FormField
         label="Document type"
-        description="Required. Select the POI document type that matches the upload."
+        description="필수 항목입니다. 업로드한 신분증과 일치하는 Document type을 선택하세요."
       >
         <select
           value={documentType}
@@ -458,34 +440,34 @@ function PoiForm({
 
       <FormField
         label="Issued country"
-        description="Required. Search and select the identity document issuing country."
+        description="필수 항목입니다. 신분증 발급국가를 검색 후 선택하세요."
       >
         <CountryCombobox
           value={issuedCountry}
           onChange={onIssuedCountryChange}
-          placeholder="Type to search countries"
+          placeholder="국가를 검색하세요"
           className={inputClassName}
         />
       </FormField>
 
       <FormField
         label="Front ID Image"
-        description="Required. Upload the front photo or scan of the identity document."
+        description="필수 항목입니다. 신분증 앞면 사진 또는 스캔본을 업로드하세요."
       >
         <FileUploadCard
           file={frontImageFile}
-          emptyLabel="Choose the front image"
+          emptyLabel="앞면 이미지를 선택하세요"
           onFileChange={onFrontFileChange}
         />
       </FormField>
 
       <FormField
         label="Back ID Image"
-        description="Optional. Upload the reverse side if the document has additional fields on the back."
+        description="선택 항목입니다. 뒷면에 추가 정보가 있으면 업로드하세요."
       >
         <FileUploadCard
           file={backImageFile}
-          emptyLabel="Choose the back image"
+          emptyLabel="뒷면 이미지를 선택하세요"
           onFileChange={onBackFileChange}
         />
       </FormField>
@@ -512,7 +494,7 @@ function PorForm({
     <div className="grid gap-6 md:grid-cols-2">
       <FormField
         label="Document type"
-        description="Required. Select the POR document type that proves the user's address."
+        description="필수 항목입니다. 주소지 증명에 해당하는 POR Document type을 선택하세요."
       >
         <select
           value={documentType}
@@ -529,23 +511,23 @@ function PorForm({
 
       <FormField
         label="Issued country"
-        description="Required. Search and select the country that issued the POR document."
+        description="필수 항목입니다. POR 문서의 발급국가를 검색 후 선택하세요."
       >
         <CountryCombobox
           value={issuedCountry}
           onChange={onIssuedCountryChange}
-          placeholder="Type to search countries"
+          placeholder="국가를 검색하세요"
           className={inputClassName}
         />
       </FormField>
 
       <FormField
         label="POR Document Upload"
-        description="Required. Upload a proof-of-residence document image."
+        description="필수 항목입니다. 주소지 증명 서류 이미지를 업로드하세요."
       >
         <FileUploadCard
           file={documentFile}
-          emptyLabel="Choose the POR document"
+          emptyLabel="POR 문서를 선택하세요"
           onFileChange={onDocumentFileChange}
         />
       </FormField>
@@ -618,7 +600,7 @@ function FileUploadCard({
         {file ? file.name : emptyLabel}
       </span>
       <span className="mt-2 text-xs leading-6 text-stone-500">
-        JPG, PNG, WEBP, HEIC up to 8MB
+        JPG, PNG, WEBP, HEIC, 최대 8MB
       </span>
       <input
         type="file"
@@ -666,7 +648,7 @@ function ImagePreviewCard({
           </div>
         ) : (
           <div className="flex h-52 items-center justify-center px-5 text-center text-sm leading-6 text-stone-500 sm:h-72 sm:px-6 sm:leading-7">
-            Upload an image to see the preview here.
+            이미지를 업로드하면 여기에 미리보기가 표시됩니다.
           </div>
         )}
       </div>

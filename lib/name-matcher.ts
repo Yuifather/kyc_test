@@ -73,8 +73,7 @@ export function matchRomanizedName({
     return {
       result: "manual_review",
       confidence: clampConfidence((evidenceConfidence + documentQualityConfidence) / 2),
-      reason:
-        "The extracted romanized name is incomplete, so manual review is recommended.",
+      reason: "추출된 영문화 이름이 불완전하여 수동 검토가 권장됩니다.",
       matchedValue: "",
       score: 0,
     };
@@ -102,8 +101,7 @@ export function matchRomanizedName({
     return {
       result: "manual_review",
       confidence: clampConfidence((bestEvaluation.score + evidenceConfidence) / 2),
-      reason:
-        "OCR is weak and the romanization is uncertain, so manual review is recommended.",
+      reason: "OCR 품질이 낮고 영문화가 불확실하여 수동 검토가 권장됩니다.",
       matchedValue: bestCandidate.value,
       score: bestEvaluation.score,
     };
@@ -120,8 +118,7 @@ export function matchRomanizedName({
       confidence: clampConfidence(
         0.35 + bestEvaluation.score * 0.2 + evidenceConfidence * 0.25,
       ),
-      reason:
-        "OCR is weak and romanization is uncertain; manual review recommended.",
+      reason: "OCR 품질이 낮고 영문화가 불확실하여 수동 검토가 권장됩니다.",
       matchedValue: bestCandidate.value,
       score: bestEvaluation.score,
     };
@@ -207,7 +204,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "manual_review",
       score: 0,
-      reason: "A reliable normalized name could not be formed from the input.",
+      reason: "입력값으로부터 신뢰할 수 있는 정규화 이름을 만들지 못했습니다.",
     };
   }
 
@@ -216,7 +213,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
       return {
         result: "likely_match",
         score: 0.93,
-        reason: "Match found only after surname/given-name order swap.",
+        reason: "성/이름 순서를 바꿨을 때 일치했습니다.",
       };
     }
 
@@ -226,7 +223,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
       return {
         result: "likely_match",
         score: 0.85,
-        reason: "Middle name missing in input, but first and last names are aligned.",
+        reason: "입력값에는 Middle name이 없지만 First name과 Last name은 일치합니다.",
       };
     }
 
@@ -234,15 +231,14 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
       return {
         result: "exact_match",
         score: 0.98,
-        reason:
-          "User input matches one alternative romanized full name after normalization.",
+        reason: "사용자 입력값이 정규화 후 대체 영문화 전체 이름 중 하나와 일치합니다.",
       };
     }
 
     return {
       result: "exact_match",
       score: 1,
-      reason: "User input matches the primary romanized full name after normalization.",
+      reason: "사용자 입력값이 정규화 후 주 영문화 전체 이름과 일치합니다.",
     };
   }
 
@@ -250,7 +246,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "likely_match",
       score: 0.89,
-      reason: "The same name tokens were found with spacing or ordering differences.",
+      reason: "띄어쓰기 또는 순서 차이만 있고 이름 토큰은 동일합니다.",
     };
   }
 
@@ -258,7 +254,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "likely_match",
       score: 0.82,
-      reason: "Middle name is omitted in one version, but first and last names are aligned.",
+      reason: "한쪽에서 Middle name이 생략되었지만 First name과 Last name은 일치합니다.",
     };
   }
 
@@ -274,7 +270,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "likely_match",
       score,
-      reason: "The names align strongly after normalization, with minor romanization variance.",
+      reason: "정규화 후 이름이 매우 유사하며 영문화 표기 차이만 작게 보입니다.",
     };
   }
 
@@ -282,7 +278,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "possible_match",
       score,
-      reason: "The names share substantial overlap, but the romanization remains somewhat ambiguous.",
+      reason: "이름 겹침은 크지만 영문화 표기가 다소 모호합니다.",
     };
   }
 
@@ -292,8 +288,8 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     result: "mismatch",
     score,
     reason: surnameMismatch
-      ? "The surname differs materially from the extracted name."
-      : "The extracted romanized name does not align closely enough with the user input.",
+      ? "성이 추출된 이름과 실질적으로 다릅니다."
+      : "추출된 영문화 이름이 사용자 입력값과 충분히 가깝게 맞지 않습니다.",
   };
 }
 

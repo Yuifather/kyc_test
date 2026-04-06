@@ -86,7 +86,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
       value: "",
       localValue: result.local_full_name,
       confidence: result.local_full_name_confidence,
-      note: "Preserved local-script full name when visible on the document.",
+      note: "문서에서 보이는 경우 로컬 원문 전체 이름을 그대로 보존합니다.",
     },
     {
       label: "Gender",
@@ -95,7 +95,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
       confidence: result.gender_confidence,
       note:
         result.gender_evidence || result.gender_notes
-          ? `${result.gender_evidence || "No direct evidence returned."} ${result.gender_notes}`.trim()
+          ? `${result.gender_evidence || "직접 확인된 근거 문구가 없습니다."} ${result.gender_notes}`.trim()
           : "",
     },
     {
@@ -126,7 +126,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
         <div className="mb-4 flex flex-col items-start gap-3 sm:mb-5 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-teal-700 sm:text-xs sm:tracking-[0.28em]">
-              POI name match verdict
+              POI 이름 매칭 결과
             </p>
             <h2 className="mt-2 break-words text-xl font-semibold text-stone-950 sm:text-3xl">
               {getMatchLabel(result.name_match_result)}
@@ -145,20 +145,20 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
 
         <div className="grid gap-4 lg:grid-cols-[1.1fr_1.2fr]">
           <InfoCard
-            eyebrow="User input"
-            title={result.user_input_english_name || "Not provided"}
-            body="English full name entered by the user."
+            eyebrow="사용자 입력"
+            title={result.user_input_english_name || "입력값 없음"}
+            body="사용자가 입력한 영문 전체 이름입니다."
           />
           <InfoCard
-            eyebrow="Primary romanization"
-            title={result.romanization_primary_full_name || "Not confidently extracted"}
-            body={result.romanization_notes || "No extra romanization notes returned."}
+            eyebrow="주 영문화 이름"
+            title={result.romanization_primary_full_name || "신뢰도 있게 추출되지 않았습니다."}
+            body={result.romanization_notes || "추가 영문화 메모가 없습니다."}
           />
         </div>
 
         <div className="mt-4 rounded-[1.2rem] border border-stone-200/70 bg-stone-50/90 p-4 sm:mt-5 sm:rounded-[1.5rem]">
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-stone-500">
-            Alternatives
+            대체 영문화 후보
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             {result.romanization_alternatives.length ? (
@@ -172,7 +172,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
               ))
             ) : (
               <span className="text-sm text-stone-500">
-                No alternative romanizations were returned.
+                대체 영문화 후보가 반환되지 않았습니다.
               </span>
             )}
           </div>
@@ -180,7 +180,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
 
         <div className="mt-4 rounded-[1.2rem] border border-stone-200/70 bg-teal-50/80 p-4 sm:mt-5 sm:rounded-[1.5rem]">
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-teal-700">
-            Reason
+            판단 사유
           </p>
           <p className="mt-2 text-sm leading-7 text-stone-700">{result.name_match_reason}</p>
         </div>
@@ -189,14 +189,14 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
       <CommonResultPanels
         result={result}
         primaryMetrics={[
-          { label: "Issued country", value: result.issued_country || "Unknown" },
-          { label: "Document type", value: result.document_type || "Unknown" },
+          { label: "Issued country", value: result.issued_country || "미확인" },
+          { label: "Document type", value: result.document_type || "미확인" },
         ]}
         secondaryMetrics={[
-          { label: "Name match", value: formatConfidence(result.name_match_confidence) },
+          { label: "이름 매칭", value: formatConfidence(result.name_match_confidence) },
           {
-            label: "Manual review",
-            value: result.manual_review_required ? "Required" : "Not required",
+            label: "수동 검토",
+            value: result.manual_review_required ? "필요" : "불필요",
           },
         ]}
         detailRows={detailRows}
@@ -268,14 +268,15 @@ function PorResults({ result }: { result: PorVerificationResult }) {
       value: result.postal_code,
       localValue: result.local_postal_code,
       confidence: result.postal_code_confidence,
-      note: `Postal code source: ${formatPostalCodeSource(result.postal_code_source)}.`,
+      note: `우편번호 출처: ${formatPostalCodeSource(result.postal_code_source)}.`,
     },
     {
       label: "Local full address",
       value: "",
       localValue: result.local_full_address,
       confidence: result.local_full_address_confidence,
-      note: result.address_notes || "Preserved full local OCR address when visible.",
+      note:
+        result.address_notes || "문서에서 보이는 경우 로컬 OCR 전체 주소를 그대로 보존합니다.",
     },
   ];
 
@@ -287,12 +288,12 @@ function PorResults({ result }: { result: PorVerificationResult }) {
         <div className="mb-4 flex flex-col items-start gap-3 sm:mb-5 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-teal-700 sm:text-xs sm:tracking-[0.28em]">
-              POR address extraction
+              POR 주소 추출 결과
             </p>
             <h2 className="mt-2 break-words text-xl font-semibold text-stone-950 sm:text-3xl">
               {result.country && result.state && result.city
-                ? "Address segmented"
-                : "Address needs review"}
+                ? "주소 분리 완료"
+                : "주소 재검토 필요"}
             </h2>
           </div>
           <div className="flex w-full flex-wrap gap-2 sm:w-auto">
@@ -301,27 +302,28 @@ function PorResults({ result }: { result: PorVerificationResult }) {
               {formatConfidence(result.overall_confidence)}
             </StatusBadge>
             <StatusBadge tone={getConfidenceTone(result.postal_code_confidence)}>
-              Postal {formatConfidence(result.postal_code_confidence)}
+              우편번호 {formatConfidence(result.postal_code_confidence)}
             </StatusBadge>
           </div>
         </div>
 
         <div className="grid gap-4 lg:grid-cols-[1.05fr_1.25fr]">
           <InfoCard
-            eyebrow="Standardized address"
-            title={[result.country, result.state, result.city]
-              .filter(Boolean)
-              .join(" / ") || "Not confidently segmented"}
+            eyebrow="표준화 주소"
+            title={
+              [result.country, result.state, result.city].filter(Boolean).join(" / ") ||
+              "신뢰도 있게 분리되지 않았습니다."
+            }
             body={
               [result.address_1, result.address_2].filter(Boolean).join(" ") ||
-              "No standardized address lines were returned."
+              "표준화된 주소 라인이 반환되지 않았습니다."
             }
           />
           <InfoCard
-            eyebrow="Postal code"
-            title={result.postal_code || "Not confirmed"}
-            body={`Source: ${formatPostalCodeSource(result.postal_code_source)}. ${
-              result.address_notes || "No extra address segmentation notes returned."
+            eyebrow="우편번호"
+            title={result.postal_code || "확인되지 않음"}
+            body={`출처: ${formatPostalCodeSource(result.postal_code_source)}. ${
+              result.address_notes || "추가 주소 분리 메모가 없습니다."
             }`}
           />
         </div>
@@ -330,17 +332,17 @@ function PorResults({ result }: { result: PorVerificationResult }) {
       <CommonResultPanels
         result={result}
         primaryMetrics={[
-          { label: "Issued country", value: result.issued_country || "Unknown" },
-          { label: "Document type", value: result.document_type || "Unknown" },
+          { label: "Issued country", value: result.issued_country || "미확인" },
+          { label: "Document type", value: result.document_type || "미확인" },
         ]}
         secondaryMetrics={[
           {
-            label: "Postal code source",
+            label: "우편번호 출처",
             value: formatPostalCodeSource(result.postal_code_source),
           },
           {
-            label: "Manual review",
-            value: result.manual_review_required ? "Required" : "Not required",
+            label: "수동 검토",
+            value: result.manual_review_required ? "필요" : "불필요",
           },
         ]}
         detailRows={detailRows}
@@ -372,7 +374,7 @@ function CommonResultPanels({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
-                Document quality
+                문서 품질
               </p>
               <h3 className="mt-2 text-xl font-semibold text-stone-950">
                 {formatConfidence(result.document_quality_confidence)}
@@ -398,7 +400,7 @@ function CommonResultPanels({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
-                Overall extraction confidence
+                전체 추출 신뢰도
               </p>
               <h3 className="mt-2 text-xl font-semibold text-stone-950">
                 {formatConfidence(result.overall_confidence)}
@@ -421,10 +423,10 @@ function CommonResultPanels({
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
-              Detailed extraction
+              상세 추출 결과
             </p>
             <h3 className="mt-2 text-xl font-semibold text-stone-950">
-              Standardized and local OCR fields
+              표준화 값과 로컬 OCR 값
             </h3>
           </div>
         </div>
@@ -437,21 +439,21 @@ function CommonResultPanels({
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-400">
-                  Standardized
+                  표준화
                 </p>
                 <p className="mt-1 text-sm leading-7 text-stone-700">
                   {row.value || (
-                    <span className="text-stone-400">Not confidently extracted</span>
+                    <span className="text-stone-400">신뢰도 있게 추출되지 않았습니다.</span>
                   )}
                 </p>
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-400">
-                  Local OCR
+                  로컬 OCR
                 </p>
                 <p className="mt-1 text-sm leading-7 text-stone-700">
                   {row.localValue || (
-                    <span className="text-stone-400">No local OCR value</span>
+                    <span className="text-stone-400">로컬 OCR 값이 없습니다.</span>
                   )}
                 </p>
                 {row.note ? (
@@ -478,7 +480,7 @@ function ManualReviewBanner({ required }: { required: boolean }) {
 
   return (
     <div className="rounded-[1.2rem] border border-amber-300/80 bg-amber-100/90 p-4 text-sm text-amber-950 shadow-[0_18px_40px_rgba(193,137,40,0.12)] sm:rounded-[1.5rem]">
-      Manual review is recommended. One or more extracted fields remain uncertain.
+      수동 검토가 권장됩니다. 하나 이상의 추출 항목이 아직 불확실합니다.
     </div>
   );
 }
@@ -487,9 +489,9 @@ function WarningsPanel({ warnings }: { warnings: string[] }) {
   return (
     <section className="rounded-[1.4rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6 sm:shadow-[0_22px_55px_rgba(34,31,23,0.07)]">
       <p className="text-xs font-semibold uppercase tracking-[0.24em] text-stone-500">
-        Warnings
+        경고
       </p>
-      <h3 className="mt-2 text-xl font-semibold text-stone-950">Review notes</h3>
+      <h3 className="mt-2 text-xl font-semibold text-stone-950">검토 메모</h3>
       <div className="mt-4 space-y-3 sm:mt-5">
         {warnings.length ? (
           warnings.map((warning) => (
@@ -502,7 +504,7 @@ function WarningsPanel({ warnings }: { warnings: string[] }) {
           ))
         ) : (
           <div className="rounded-[1.25rem] border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-950">
-            No additional warnings were generated for this document.
+            이 문서에 대한 추가 경고는 없습니다.
           </div>
         )}
       </div>
@@ -564,9 +566,9 @@ function formatPostalCodeSource(source: PorVerificationResult["postal_code_sourc
     case "ocr":
       return "OCR";
     case "lookup":
-      return "Japan Post lookup";
+      return "Japan Post 조회";
     case "none":
     default:
-      return "Not confirmed";
+      return "확인되지 않음";
   }
 }

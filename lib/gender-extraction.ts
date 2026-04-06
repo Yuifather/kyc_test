@@ -114,7 +114,7 @@ export function resolveGenderExtraction({
       gender_evidence: "",
       gender_notes:
         genderNotes.trim() ||
-        "Gender was withheld because no printed label/value evidence was confirmed.",
+        "인쇄된 성별 표기와 값 근거를 확인하지 못해 Gender를 비워두었습니다.",
     };
   }
 
@@ -126,7 +126,7 @@ export function resolveGenderExtraction({
       gender_evidence: evidence,
       gender_notes:
         genderNotes.trim() ||
-        "Gender evidence was present but could not be validated against supported mappings.",
+        "Gender 관련 근거는 있었지만 지원하는 매핑 기준으로 검증하지 못했습니다.",
     };
   }
 
@@ -140,7 +140,7 @@ export function resolveGenderExtraction({
       gender_evidence: evidence,
       gender_notes:
         genderNotes.trim() ||
-        "Gender evidence was present but remained too ambiguous to trust.",
+        "Gender 관련 근거는 있었지만 신뢰하기에는 여전히 모호합니다.",
     };
   }
 
@@ -151,7 +151,7 @@ export function resolveGenderExtraction({
       gender_source: "unknown" as GenderSource,
       gender_evidence: evidence,
       gender_notes:
-        "Gender evidence conflicts with the model output, so manual review is recommended.",
+        "Gender 근거와 모델 결과가 서로 달라 수동 검토가 권장됩니다.",
     };
   }
 
@@ -170,8 +170,8 @@ export function resolveGenderExtraction({
     gender_notes:
       genderNotes.trim() ||
       (hasKnownLabel
-        ? "Validated from a printed gender/sex label and OCR value."
-        : "A likely gender value was found, but the supporting label was not fully clear."),
+        ? "인쇄된 성별 표기와 OCR 값을 기준으로 검증했습니다."
+        : "가능성 있는 Gender 값은 찾았지만 이를 뒷받침하는 표기가 충분히 명확하지 않습니다."),
   };
 }
 

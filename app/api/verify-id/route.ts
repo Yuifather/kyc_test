@@ -20,7 +20,7 @@ export async function POST(request: Request) {
 
   if (!rateLimit.allowed) {
     return jsonError(
-      "Too many verification attempts. Please try again later.",
+      "검증 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
       429,
       rateLimit.retryAfterSeconds,
     );
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
       if (!(documentFile instanceof File)) {
         throw new VerificationError(
           400,
-          "Upload the POR document image.",
+          "POR 문서 이미지를 업로드해주세요.",
           "No POR document image file was provided.",
         );
       }
@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     if (!(frontFile instanceof File)) {
       throw new VerificationError(
         400,
-        "Upload the front image of the ID.",
+        "신분증 앞면 이미지를 업로드해주세요.",
         "No front image file was provided.",
       );
     }
@@ -85,12 +85,12 @@ export async function POST(request: Request) {
     }
 
     if (error instanceof Error && error.message.includes("OPENAI_API_KEY")) {
-      return jsonError("The server is missing OPENAI_API_KEY.", 500);
+      return jsonError("서버에 OPENAI_API_KEY가 설정되어 있지 않습니다.", 500);
     }
 
     console.error("ID verification failed:", error);
     return jsonError(
-      "An error occurred while analyzing the document images. Check the uploaded files and try again.",
+      "문서 이미지를 분석하는 중 오류가 발생했습니다. 업로드한 파일을 확인한 뒤 다시 시도해주세요.",
       500,
     );
   }
