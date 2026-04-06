@@ -120,7 +120,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
 
   return (
     <div className="space-y-6">
-      <ManualReviewBanner required={result.manual_review_required} />
+      <ReviewStatusBanner status={result.review_status} />
 
       <section className="rounded-[1.6rem] border border-stone-200/80 bg-white/88 p-4 shadow-[0_22px_54px_rgba(34,31,23,0.08)] sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_70px_rgba(34,31,23,0.08)]">
         <div className="mb-4 flex flex-col items-start gap-3 sm:mb-5 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
@@ -194,10 +194,7 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
         ]}
         secondaryMetrics={[
           { label: "이름 매칭", value: formatConfidence(result.name_match_confidence) },
-          {
-            label: "수동 검토",
-            value: result.manual_review_required ? "필요" : "불필요",
-          },
+          { label: "최종 판정", value: result.review_status },
         ]}
         detailRows={detailRows}
       />
@@ -282,7 +279,7 @@ function PorResults({ result }: { result: PorVerificationResult }) {
 
   return (
     <div className="space-y-6">
-      <ManualReviewBanner required={result.manual_review_required} />
+      <ReviewStatusBanner status={result.review_status} />
 
       <section className="rounded-[1.6rem] border border-stone-200/80 bg-white/88 p-4 shadow-[0_22px_54px_rgba(34,31,23,0.08)] sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_70px_rgba(34,31,23,0.08)]">
         <div className="mb-4 flex flex-col items-start gap-3 sm:mb-5 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between sm:gap-4">
@@ -340,10 +337,7 @@ function PorResults({ result }: { result: PorVerificationResult }) {
             label: "우편번호 출처",
             value: formatPostalCodeSource(result.postal_code_source),
           },
-          {
-            label: "수동 검토",
-            value: result.manual_review_required ? "필요" : "불필요",
-          },
+          { label: "최종 판정", value: result.review_status },
         ]}
         detailRows={detailRows}
       />
@@ -473,14 +467,22 @@ function CommonResultPanels({
   );
 }
 
-function ManualReviewBanner({ required }: { required: boolean }) {
-  if (!required) {
-    return null;
-  }
+function ReviewStatusBanner({
+  status,
+}: {
+  status: VerificationResult["review_status"];
+}) {
+  const tone = getReviewStatusTone(status);
 
   return (
-    <div className="rounded-[1.2rem] border border-amber-300/80 bg-amber-100/90 p-4 text-sm text-amber-950 shadow-[0_18px_40px_rgba(193,137,40,0.12)] sm:rounded-[1.5rem]">
-      수동 검토가 권장됩니다. 하나 이상의 추출 항목이 아직 불확실합니다.
+    <div
+      className={`rounded-[1.2rem] border p-4 text-sm shadow-[0_18px_40px_rgba(34,31,23,0.08)] sm:rounded-[1.5rem] ${getReviewStatusBannerClasses(
+        tone,
+      )}`}
+    >
+      <p className="text-xs font-semibold uppercase tracking-[0.22em]">최종 판정</p>
+      <p className="mt-2 text-base font-semibold sm:text-lg">{status}</p>
+      <p className="mt-2 leading-7">{getReviewStatusDescription(status)}</p>
     </div>
   );
 }
@@ -570,5 +572,41 @@ function formatPostalCodeSource(source: PorVerificationResult["postal_code_sourc
     case "none":
     default:
       return "확인되지 않음";
+  }
+}
+
+function getReviewStatusTone(status: VerificationResult["review_status"]): ConfidenceTone {
+  switch (status) {
+    case "사람이 확인 안해도 괜찮다":
+      return "good";
+    case "사람이 확인해야하는 문서다":
+      return "review";
+    case "이건 무조건 잘못된 문서다":
+    default:
+      return "low";
+  }
+}
+
+function getReviewStatusBannerClasses(tone: ConfidenceTone) {
+  switch (tone) {
+    case "good":
+      return "border-emerald-300/80 bg-emerald-100/90 text-emerald-950";
+    case "review":
+      return "border-amber-300/80 bg-amber-100/90 text-amber-950";
+    case "low":
+    default:
+      return "border-rose-300/80 bg-rose-100/90 text-rose-950";
+  }
+}
+
+function getReviewStatusDescription(status: VerificationResult["review_status"]) {
+  switch (status) {
+    case "사람이 확인 안해도 괜찮다":
+      return "핵심 OCR 필드가 비교적 안정적으로 추출되어 추가 확인 없이 진행 가능한 상태입니다.";
+    case "사람이 확인해야하는 문서다":
+      return "문서는 읽혔지만 일부 핵심 필드나 신뢰도가 경계선이어서 사람이 한 번 확인하는 편이 안전합니다.";
+    case "이건 무조건 잘못된 문서다":
+    default:
+      return "핵심 필드가 비어 있거나 결과가 서로 모순되어 현재 상태로는 올바른 문서로 보기 어렵습니다.";
   }
 }

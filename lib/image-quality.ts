@@ -27,23 +27,23 @@ export function inspectImageQuality(
     const longestSide = Math.max(width, height);
     const aspectRatio = longestSide / shortestSide;
 
-    if (shortestSide < 700) {
-      confidence -= 0.25;
-      notes.push("이미지 해상도가 낮아 OCR 정확도에 불리합니다.");
-      warnings.push("해상도가 낮아 OCR 신뢰도가 떨어질 수 있습니다.");
-    } else if (shortestSide < 1000) {
-      confidence -= 0.12;
-      notes.push("이미지 해상도가 충분히 높지 않아 추출 품질이 낮아질 수 있습니다.");
+    if (shortestSide < 420) {
+      confidence -= 0.2;
+      notes.push("이미지 해상도가 매우 낮아 OCR 정확도에 불리할 수 있습니다.");
+      warnings.push("해상도가 매우 낮아 OCR 신뢰도가 떨어질 수 있습니다.");
+    } else if (shortestSide < 640) {
+      confidence -= 0.08;
+      notes.push("이미지 해상도가 아주 높지는 않지만 현재 크기에서도 OCR은 시도 가능합니다.");
     }
 
-    if (aspectRatio > 2.4) {
+    if (aspectRatio > 2.8) {
       confidence -= 0.12;
       notes.push("문서 촬영치고는 이미지 비율이 비정상적입니다.");
       warnings.push("문서 프레이밍이 좁거나 일부가 잘렸을 수 있습니다.");
     }
   }
 
-  if (fileSize < 80 * 1024) {
+  if (fileSize < 45 * 1024) {
     confidence -= 0.08;
     notes.push("업로드한 파일 크기가 매우 작아 과도한 압축이 있었을 가능성이 있습니다.");
   }

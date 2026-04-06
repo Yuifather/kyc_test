@@ -16,6 +16,7 @@ import {
 import type {
   PoiVerificationResult,
   PorVerificationResult,
+  ReviewStatus,
 } from "@/types/verification";
 
 export const MAX_FILE_SIZE_BYTES = 8 * 1024 * 1024;
@@ -116,6 +117,8 @@ Rules:
   - address_2 should contain numbers, building names, and room numbers.
   - Standardized country/state/city/address_1/address_2 should be returned in uppercase Latin characters when possible.
   - Example: "501-4452 郡上市八幡町美山2455番地1" for the addressee should be split as country JAPAN, state GIFU, city GUJO-SHI, address_1 HACHIMAN-CHO MIYAMA, address_2 2455-1, postal_code 501-4452.
+  - Example: "上益城郡益城町安永529" should be split as country JAPAN, state KUMAMOTO, city KAMIMASHIKI-GUN, address_1 MASHIKI-MACHI, address_2 YASUNAGA 529, postal_code 861-2231.
+  - When the local recipient address is "郡上市八幡町美山2455番地1", local_city must be "郡上市" and local_address_1 must be "八幡町美山". Do not split it as "郡" plus "上市八幡町美山".
 - Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
@@ -218,9 +221,28 @@ export async function verifyPoiDocument({
       cleaned.nationality_confidence,
     ]),
   );
+  const manualReviewRequired =
+    nameMatch.result === "manual_review" || documentQualityConfidence < 0.55;
+  const reviewStatus = derivePoiReviewStatus({
+    manualReviewRequired,
+    nameMatchResult: nameMatch.result,
+    firstName: cleaned.first_name,
+    firstNameConfidence: cleaned.first_name_confidence,
+    lastName: cleaned.last_name,
+    lastNameConfidence: cleaned.last_name_confidence,
+    localFullName: cleaned.local_full_name,
+    localFullNameConfidence: cleaned.local_full_name_confidence,
+    documentNumber: cleaned.document_number,
+    documentNumberConfidence: cleaned.document_number_confidence,
+    dateOfBirth: cleaned.date_of_birth,
+    dateOfBirthConfidence: cleaned.date_of_birth_confidence,
+    dateOfExpiry: cleaned.date_of_expiry,
+    dateOfExpiryConfidence: cleaned.date_of_expiry_confidence,
+  });
 
   return {
     kind: "poi",
+    review_status: reviewStatus,
     user_input_english_name: englishName.trim(),
     document_type: cleaned.document_type || documentTypeHint.trim(),
     local_document_type: cleaned.local_document_type,
@@ -275,8 +297,7 @@ export async function verifyPoiDocument({
     name_match_confidence: nameMatch.confidence,
     name_match_reason: nameMatch.reason,
     overall_confidence: overallConfidence,
-    manual_review_required:
-      nameMatch.result === "manual_review" || documentQualityConfidence < 0.55,
+    manual_review_required: manualReviewRequired,
     warnings,
   };
 }
@@ -350,9 +371,32 @@ export async function verifyPorDocument({
       finalPostalCodeConfidence,
     ]),
   );
+  const manualReviewRequired =
+    cleaned.manual_review_required ||
+    documentQualityConfidence < 0.55 ||
+    !cleaned.country ||
+    !cleaned.state ||
+    !cleaned.city ||
+    !cleaned.address_1;
+  const reviewStatus = derivePorReviewStatus({
+    manualReviewRequired,
+    country: cleaned.country,
+    countryConfidence: cleaned.country_confidence,
+    state: cleaned.state,
+    stateConfidence: cleaned.state_confidence,
+    city: cleaned.city,
+    cityConfidence: cleaned.city_confidence,
+    address1: cleaned.address_1,
+    address1Confidence: cleaned.address_1_confidence,
+    address2: cleaned.address_2,
+    address2Confidence: cleaned.address_2_confidence,
+    postalCode: finalPostalCode,
+    postalCodeConfidence: finalPostalCodeConfidence,
+  });
 
   return {
     kind: "por",
+    review_status: reviewStatus,
     document_type: cleaned.document_type || documentTypeHint.trim(),
     local_document_type: cleaned.local_document_type,
     document_type_confidence: cleaned.document_type_confidence,
@@ -393,13 +437,7 @@ export async function verifyPorDocument({
     local_full_address_confidence: cleaned.local_full_address_confidence,
     address_notes: cleaned.address_notes,
     overall_confidence: overallConfidence,
-    manual_review_required:
-      cleaned.manual_review_required ||
-      documentQualityConfidence < 0.55 ||
-      !cleaned.country ||
-      !cleaned.state ||
-      !cleaned.city ||
-      !cleaned.address_1,
+    manual_review_required: manualReviewRequired,
     warnings,
   };
 }
@@ -547,6 +585,9 @@ async function extractPorWithOpenAI({
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
+    'Japanese split example 1: "郡上市八幡町美山2455番地1" -> city "GUJO-SHI", address_1 "HACHIMAN-CHO MIYAMA", address_2 "2455-1".',
+    'Japanese split example 2: "上益城郡益城町安永529" -> city "KAMIMASHIKI-GUN", address_1 "MASHIKI-MACHI", address_2 "YASUNAGA 529".',
+    'For the same examples, local_city should remain "郡上市" or "上益城郡", and local_address_1 should remain "八幡町美山" or "益城町".',
   ].join("\n");
 
   const inputContent = [
@@ -704,6 +745,8 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     localState: cleanText(extraction.local_state),
     localCity: cleanText(extraction.local_city),
     localAddress1: cleanText(extraction.local_address_1),
+    localAddress2: cleanText(extraction.local_address_2),
+    localFullAddress,
   });
   const localPostalCode = cleanText(extraction.local_postal_code) || visiblePostalCode;
   const postalCodeConfidence = visiblePostalCode
@@ -749,7 +792,7 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     local_address_1: rebalancedJapaneseAddress.localAddress1,
     address_1_confidence: clampConfidence(extraction.address_1_confidence),
     address_2: cleanUppercaseText(extraction.address_2),
-    local_address_2: cleanText(extraction.local_address_2),
+    local_address_2: rebalancedJapaneseAddress.localAddress2,
     address_2_confidence: clampConfidence(extraction.address_2_confidence),
     postal_code: visiblePostalCode,
     local_postal_code: localPostalCode,
@@ -770,6 +813,8 @@ function rebalanceJapanesePorLocalAddress({
   localState,
   localCity,
   localAddress1,
+  localAddress2,
+  localFullAddress,
 }: {
   issuedCountry: string;
   country: string;
@@ -777,64 +822,40 @@ function rebalanceJapanesePorLocalAddress({
   localState: string;
   localCity: string;
   localAddress1: string;
+  localAddress2: string;
+  localFullAddress: string;
 }) {
   if (!shouldApplyJapanesePorHeuristics({ issuedCountry, country, localCountry, localState })) {
     return {
       localCity,
       localAddress1,
+      localAddress2,
       note: "",
     };
   }
 
-  const cityMatch = localCity.match(/^(.*?(?:市.+?区|市|区|郡))(.*)$/u);
-
-  if (!cityMatch) {
-    return {
-      localCity,
-      localAddress1,
-      note: "",
-    };
-  }
-
-  const nextLocalCity = cleanText(cityMatch[1] ?? "");
-  const remainder = cleanText(cityMatch[2] ?? "");
-
-  if (!nextLocalCity || !remainder) {
-    return {
-      localCity,
-      localAddress1,
-      note: "",
-    };
-  }
-
-  if (localAddress1 && remainder === localAddress1) {
-    return {
-      localCity: nextLocalCity,
-      localAddress1,
-      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
-    };
-  }
-
-  if (localAddress1 && remainder.endsWith(localAddress1)) {
-    return {
-      localCity: nextLocalCity,
-      localAddress1: remainder,
-      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
-    };
-  }
-
-  if (!localAddress1) {
-    return {
-      localCity: nextLocalCity,
-      localAddress1: remainder,
-      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
-    };
-  }
-
-  return {
+  const parsed = parseJapaneseRecipientAddress({
+    localState,
     localCity,
     localAddress1,
-    note: "",
+    localAddress2,
+    localFullAddress,
+  });
+  const nextLocalCity = parsed.localCity || localCity;
+  const nextLocalAddress1 = parsed.localAddress1 || localAddress1;
+  const nextLocalAddress2 = parsed.localAddress2 || localAddress2;
+  const changed =
+    nextLocalCity !== localCity ||
+    nextLocalAddress1 !== localAddress1 ||
+    nextLocalAddress2 !== localAddress2;
+
+  return {
+    localCity: nextLocalCity,
+    localAddress1: nextLocalAddress1,
+    localAddress2: nextLocalAddress2,
+    note: changed
+      ? "일본 주소를 수신자 기준으로 다시 분리해 City, Address 1, Address 2를 정리했습니다."
+      : "",
   };
 }
 
@@ -906,6 +927,242 @@ function buildPorWarnings(
   }
 
   return warnings;
+}
+
+function derivePoiReviewStatus({
+  manualReviewRequired,
+  nameMatchResult,
+  firstName,
+  firstNameConfidence,
+  lastName,
+  lastNameConfidence,
+  localFullName,
+  localFullNameConfidence,
+  documentNumber,
+  documentNumberConfidence,
+  dateOfBirth,
+  dateOfBirthConfidence,
+  dateOfExpiry,
+  dateOfExpiryConfidence,
+}: {
+  manualReviewRequired: boolean;
+  nameMatchResult: PoiVerificationResult["name_match_result"];
+  firstName: string;
+  firstNameConfidence: number;
+  lastName: string;
+  lastNameConfidence: number;
+  localFullName: string;
+  localFullNameConfidence: number;
+  documentNumber: string;
+  documentNumberConfidence: number;
+  dateOfBirth: string;
+  dateOfBirthConfidence: number;
+  dateOfExpiry: string;
+  dateOfExpiryConfidence: number;
+}): ReviewStatus {
+  const hasNameEvidence = Boolean(localFullName || (firstName && lastName));
+  const hasDocumentEvidence = Boolean(documentNumber || dateOfBirth || dateOfExpiry);
+  const coreFields = [
+    { value: firstName, confidence: firstNameConfidence },
+    { value: lastName, confidence: lastNameConfidence },
+    { value: localFullName, confidence: localFullNameConfidence },
+    { value: documentNumber, confidence: documentNumberConfidence },
+    { value: dateOfBirth, confidence: dateOfBirthConfidence },
+    { value: dateOfExpiry, confidence: dateOfExpiryConfidence },
+  ];
+
+  if (nameMatchResult === "mismatch" || !hasNameEvidence || !hasDocumentEvidence) {
+    return "이건 무조건 잘못된 문서다";
+  }
+
+  if (
+    nameMatchResult === "possible_match" ||
+    nameMatchResult === "manual_review" ||
+    hasLowConfidencePresentField(coreFields, 0.65) ||
+    (manualReviewRequired && hasLowConfidencePresentField(coreFields, 0.8))
+  ) {
+    return "사람이 확인해야하는 문서다";
+  }
+
+  return "사람이 확인 안해도 괜찮다";
+}
+
+function derivePorReviewStatus({
+  manualReviewRequired,
+  country,
+  countryConfidence,
+  state,
+  stateConfidence,
+  city,
+  cityConfidence,
+  address1,
+  address1Confidence,
+  address2,
+  address2Confidence,
+  postalCode,
+  postalCodeConfidence,
+}: {
+  manualReviewRequired: boolean;
+  country: string;
+  countryConfidence: number;
+  state: string;
+  stateConfidence: number;
+  city: string;
+  cityConfidence: number;
+  address1: string;
+  address1Confidence: number;
+  address2: string;
+  address2Confidence: number;
+  postalCode: string;
+  postalCodeConfidence: number;
+}): ReviewStatus {
+  const hasCoreAddressEvidence = Boolean(country && state && city && address1);
+  const coreFields = [
+    { value: country, confidence: countryConfidence },
+    { value: state, confidence: stateConfidence },
+    { value: city, confidence: cityConfidence },
+    { value: address1, confidence: address1Confidence },
+    { value: address2, confidence: address2Confidence },
+    { value: postalCode, confidence: postalCodeConfidence },
+  ];
+
+  if (!hasCoreAddressEvidence) {
+    return "이건 무조건 잘못된 문서다";
+  }
+
+  if (
+    hasLowConfidencePresentField(coreFields, 0.65) ||
+    (manualReviewRequired && hasLowConfidencePresentField(coreFields, 0.8))
+  ) {
+    return "사람이 확인해야하는 문서다";
+  }
+
+  return "사람이 확인 안해도 괜찮다";
+}
+
+function hasLowConfidencePresentField(
+  fields: Array<{ value: string; confidence: number }>,
+  threshold: number,
+) {
+  return fields.some(
+    (field) => Boolean(field.value) && Number.isFinite(field.confidence) && field.confidence < threshold,
+  );
+}
+
+function parseJapaneseRecipientAddress({
+  localState,
+  localCity,
+  localAddress1,
+  localAddress2,
+  localFullAddress,
+}: {
+  localState: string;
+  localCity: string;
+  localAddress1: string;
+  localAddress2: string;
+  localFullAddress: string;
+}) {
+  const sourceAddress = normalizeJapaneseAddressText(
+    localFullAddress || `${localState}${localCity}${localAddress1}${localAddress2}`,
+  );
+
+  if (!sourceAddress) {
+    return {
+      localCity,
+      localAddress1,
+      localAddress2,
+    };
+  }
+
+  let remainder = sourceAddress.replace(/^〒/u, "");
+  remainder = remainder.replace(/^\d{3}[-－ーｰ]?\d{4}/u, "");
+
+  const normalizedState = normalizeJapaneseAddressText(localState);
+
+  if (normalizedState && remainder.startsWith(normalizedState)) {
+    remainder = remainder.slice(normalizedState.length);
+  }
+
+  const cityMatch = matchJapaneseCityBoundary(remainder);
+
+  if (!cityMatch) {
+    return {
+      localCity,
+      localAddress1,
+      localAddress2,
+    };
+  }
+
+  const nextLocalCity = cityMatch.city;
+  remainder = cityMatch.remainder;
+  let nextLocalAddress1 = "";
+  let nextLocalAddress2 = "";
+
+  if (nextLocalCity.endsWith("郡")) {
+    const districtMatch = remainder.match(/^(.+?[町村])(.*)$/u);
+
+    if (districtMatch) {
+      nextLocalAddress1 = cleanText(districtMatch[1] ?? "");
+      remainder = cleanText(districtMatch[2] ?? "");
+    }
+  }
+
+  if (!nextLocalAddress1) {
+    const chomeMatch = remainder.match(/^(.+?)([0-9０-９一二三四五六七八九十]+丁目.*)$/u);
+
+    if (chomeMatch) {
+      nextLocalAddress1 = cleanText(chomeMatch[1] ?? "");
+      remainder = cleanText(chomeMatch[2] ?? "");
+    }
+  }
+
+  if (!nextLocalAddress1) {
+    const numericIndex = remainder.search(/[0-9０-９]/u);
+
+    if (numericIndex > 0) {
+      nextLocalAddress1 = cleanText(remainder.slice(0, numericIndex));
+      remainder = cleanText(remainder.slice(numericIndex));
+    }
+  }
+
+  if (!nextLocalAddress1) {
+    nextLocalAddress1 = cleanText(remainder);
+    remainder = "";
+  }
+
+  nextLocalAddress2 = cleanText(remainder) || cleanText(localAddress2);
+
+  return {
+    localCity: cleanText(nextLocalCity) || cleanText(localCity),
+    localAddress1: cleanText(nextLocalAddress1) || cleanText(localAddress1),
+    localAddress2: nextLocalAddress2,
+  };
+}
+
+function matchJapaneseCityBoundary(value: string) {
+  const patterns = [
+    /^(.+?市.+?区)(.+)$/u,
+    /^(.+?市)(.+)$/u,
+    /^(.+?区)(.+)$/u,
+    /^(.+?郡)(.+)$/u,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+
+    if (match) {
+      return {
+        city: cleanText(match[1] ?? ""),
+        remainder: cleanText(match[2] ?? ""),
+      };
+    }
+  }
+
+  return null;
+}
+
+function normalizeJapaneseAddressText(value: string) {
+  return cleanText(value).normalize("NFKC").replace(/\s+/g, "");
 }
 
 function cleanText(value: string) {
