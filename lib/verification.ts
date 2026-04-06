@@ -104,13 +104,18 @@ Rules:
 - address_notes should explain any segmentation ambiguity.
 - Write explanatory text fields such as document_quality_notes, address_notes, and warnings in Korean.
 - Keep normalized data values such as document_type, issued_country, country/state/city/address fields, and dates in their required output format.
+- When multiple addresses are visible, always choose the recipient/addressee residence address for POR.
+- Ignore sender, issuer, office, branch, footer, contact, or return addresses unless they are clearly the recipient address.
+- On mailed notices, bills, giro slips, or utility documents, prefer the address block directly associated with the recipient name, often located above the recipient name and honorific.
+- local_full_address must contain only the selected recipient/addressee address block, not a concatenation of recipient and sender addresses.
 - For Japanese addresses:
   - country should be JAPAN.
   - state should be prefecture only.
   - city should contain the city/ward/district level. If both city and ward appear, include both in city.
-  - address_1 should contain town or neighborhood only, without block/building/room.
+  - address_1 should contain the recipient-side local area below city level and before the numeric block/building/room. It may include sub-municipal area names such as HACHIMAN-CHO MIYAMA when that is the clearest recipient address split.
   - address_2 should contain numbers, building names, and room numbers.
   - Standardized country/state/city/address_1/address_2 should be returned in uppercase Latin characters when possible.
+  - Example: "501-4452 郡上市八幡町美山2455番地1" for the addressee should be split as country JAPAN, state GIFU, city GUJO-SHI, address_1 HACHIMAN-CHO MIYAMA, address_2 2455-1, postal_code 501-4452.
 - Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
@@ -539,6 +544,9 @@ async function extractPorWithOpenAI({
     "Analyze the POR document image and extract the requested fields.",
     "Return local OCR text separately whenever it exists.",
     "Do not guess postal_code from the address. Leave it blank unless it is explicitly visible.",
+    "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
+    "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
+    "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
   ].join("\n");
 
   const inputContent = [
@@ -684,7 +692,32 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
 
 function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
-  const normalizedPostalCode = normalizePostalCode(extraction.postal_code);
+  const localFullAddress = cleanText(extraction.local_full_address);
+  const visiblePostalCode =
+    normalizePostalCode(extraction.postal_code) ||
+    normalizePostalCode(extraction.local_postal_code) ||
+    extractPostalCodeFromText(localFullAddress);
+  const rebalancedJapaneseAddress = rebalanceJapanesePorLocalAddress({
+    issuedCountry: cleanText(extraction.issued_country),
+    country: cleanUppercaseText(extraction.country),
+    localCountry: cleanText(extraction.local_country),
+    localState: cleanText(extraction.local_state),
+    localCity: cleanText(extraction.local_city),
+    localAddress1: cleanText(extraction.local_address_1),
+  });
+  const localPostalCode = cleanText(extraction.local_postal_code) || visiblePostalCode;
+  const postalCodeConfidence = visiblePostalCode
+    ? Math.max(
+        clampConfidence(extraction.postal_code_confidence),
+        extraction.postal_code ? 0.7 : 0.78,
+      )
+    : clampConfidence(Math.min(extraction.postal_code_confidence, 0.35));
+  const addressNotes = uniqueStrings(
+    [
+      cleanText(extraction.address_notes),
+      rebalancedJapaneseAddress.note,
+    ].filter(Boolean),
+  ).join(" ");
 
   return {
     document_type: cleanText(extraction.document_type),
@@ -710,25 +743,98 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     local_state: cleanText(extraction.local_state),
     state_confidence: clampConfidence(extraction.state_confidence),
     city: cleanUppercaseText(extraction.city),
-    local_city: cleanText(extraction.local_city),
+    local_city: rebalancedJapaneseAddress.localCity,
     city_confidence: clampConfidence(extraction.city_confidence),
     address_1: cleanUppercaseText(extraction.address_1),
-    local_address_1: cleanText(extraction.local_address_1),
+    local_address_1: rebalancedJapaneseAddress.localAddress1,
     address_1_confidence: clampConfidence(extraction.address_1_confidence),
     address_2: cleanUppercaseText(extraction.address_2),
     local_address_2: cleanText(extraction.local_address_2),
     address_2_confidence: clampConfidence(extraction.address_2_confidence),
-    postal_code: normalizedPostalCode,
-    local_postal_code: cleanText(extraction.local_postal_code),
-    postal_code_confidence: normalizedPostalCode
-      ? clampConfidence(extraction.postal_code_confidence)
-      : clampConfidence(Math.min(extraction.postal_code_confidence, 0.35)),
-    local_full_address: cleanText(extraction.local_full_address),
+    postal_code: visiblePostalCode,
+    local_postal_code: localPostalCode,
+    postal_code_confidence: postalCodeConfidence,
+    local_full_address: localFullAddress,
     local_full_address_confidence: clampConfidence(extraction.local_full_address_confidence),
-    address_notes: cleanText(extraction.address_notes),
+    address_notes: addressNotes,
     overall_confidence: clampConfidence(extraction.overall_confidence),
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
+  };
+}
+
+function rebalanceJapanesePorLocalAddress({
+  issuedCountry,
+  country,
+  localCountry,
+  localState,
+  localCity,
+  localAddress1,
+}: {
+  issuedCountry: string;
+  country: string;
+  localCountry: string;
+  localState: string;
+  localCity: string;
+  localAddress1: string;
+}) {
+  if (!shouldApplyJapanesePorHeuristics({ issuedCountry, country, localCountry, localState })) {
+    return {
+      localCity,
+      localAddress1,
+      note: "",
+    };
+  }
+
+  const cityMatch = localCity.match(/^(.*?(?:市.+?区|市|区|郡))(.*)$/u);
+
+  if (!cityMatch) {
+    return {
+      localCity,
+      localAddress1,
+      note: "",
+    };
+  }
+
+  const nextLocalCity = cleanText(cityMatch[1] ?? "");
+  const remainder = cleanText(cityMatch[2] ?? "");
+
+  if (!nextLocalCity || !remainder) {
+    return {
+      localCity,
+      localAddress1,
+      note: "",
+    };
+  }
+
+  if (localAddress1 && remainder === localAddress1) {
+    return {
+      localCity: nextLocalCity,
+      localAddress1,
+      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
+    };
+  }
+
+  if (localAddress1 && remainder.endsWith(localAddress1)) {
+    return {
+      localCity: nextLocalCity,
+      localAddress1: remainder,
+      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
+    };
+  }
+
+  if (!localAddress1) {
+    return {
+      localCity: nextLocalCity,
+      localAddress1: remainder,
+      note: "일본 주소를 수신자 기준으로 다시 분리해 City와 Address 1을 정리했습니다.",
+    };
+  }
+
+  return {
+    localCity,
+    localAddress1,
+    note: "",
   };
 }
 
@@ -827,6 +933,36 @@ function cleanText(value: string) {
 function cleanUppercaseText(value: string) {
   const cleaned = cleanText(value);
   return /[a-z]/i.test(cleaned) ? cleaned.toUpperCase() : cleaned;
+}
+
+function shouldApplyJapanesePorHeuristics({
+  issuedCountry,
+  country,
+  localCountry,
+  localState,
+}: {
+  issuedCountry: string;
+  country: string;
+  localCountry: string;
+  localState: string;
+}) {
+  const normalizedValues = [issuedCountry, country, localCountry, localState]
+    .map((value) => value.normalize("NFKC").toLowerCase().trim())
+    .filter(Boolean);
+
+  return normalizedValues.some((value) =>
+    ["japan", "jp", "日本"].includes(value),
+  );
+}
+
+function extractPostalCodeFromText(value: string) {
+  const match = value.match(/\b(\d{3})[-－ーｰ]?(\d{4})\b/);
+
+  if (!match) {
+    return "";
+  }
+
+  return `${match[1]}-${match[2]}`;
 }
 
 function normalizeDateValue(value: string) {
