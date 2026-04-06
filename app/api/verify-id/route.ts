@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
-import { VerificationError, verifyIdDocument } from "@/lib/verification";
+import {
+  VerificationError,
+  verifyPoiDocument,
+  verifyPorDocument,
+} from "@/lib/verification";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,11 +28,35 @@ export async function POST(request: Request) {
 
   try {
     const formData = await request.formData();
+    const verificationKind = String(formData.get("verificationKind") ?? "poi").trim();
     const englishName = String(formData.get("englishName") ?? "");
     const countryHint = String(formData.get("countryHint") ?? "");
     const documentTypeHint = String(formData.get("documentTypeHint") ?? "");
     const frontFile = formData.get("frontImage");
     const backFile = formData.get("backImage");
+    const documentFile = formData.get("documentImage");
+
+    if (verificationKind === "por") {
+      if (!(documentFile instanceof File)) {
+        throw new VerificationError(
+          400,
+          "Upload the POR document image.",
+          "No POR document image file was provided.",
+        );
+      }
+
+      const result = await verifyPorDocument({
+        countryHint,
+        documentTypeHint,
+        documentFile,
+      });
+
+      return NextResponse.json(result, {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      });
+    }
 
     if (!(frontFile instanceof File)) {
       throw new VerificationError(
@@ -38,7 +66,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await verifyIdDocument({
+    const result = await verifyPoiDocument({
       englishName,
       countryHint,
       documentTypeHint,
@@ -62,7 +90,7 @@ export async function POST(request: Request) {
 
     console.error("ID verification failed:", error);
     return jsonError(
-      "An error occurred while analyzing the ID images. Check the uploaded files and try again.",
+      "An error occurred while analyzing the document images. Check the uploaded files and try again.",
       500,
     );
   }

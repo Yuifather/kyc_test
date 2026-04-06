@@ -3,14 +3,20 @@ import { zodTextFormat } from "openai/helpers/zod";
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
 import { resolveGenderExtraction } from "@/lib/gender-extraction";
 import { inspectImageQuality } from "@/lib/image-quality";
+import { lookupJapanPostalCode } from "@/lib/japan-post";
 import { matchRomanizedName } from "@/lib/name-matcher";
 import { normalizeLooseText, uniqueNameList } from "@/lib/name-normalizer";
 import { getModelCandidates, getOpenAIClient } from "@/lib/openai";
 import {
-  type OpenAiExtraction,
-  openAiExtractionSchema,
+  type OpenAiPoiExtraction,
+  type OpenAiPorExtraction,
+  openAiPoiExtractionSchema,
+  openAiPorExtractionSchema,
 } from "@/lib/openai-schema";
-import type { VerificationResult } from "@/types/verification";
+import type {
+  PoiVerificationResult,
+  PorVerificationResult,
+} from "@/types/verification";
 
 export const MAX_FILE_SIZE_BYTES = 8 * 1024 * 1024;
 
@@ -40,7 +46,7 @@ interface OpenAIStyleError extends Error {
   type?: string | null;
 }
 
-interface VerifyIdInput {
+interface VerifyPoiInput {
   englishName: string;
   countryHint: string;
   documentTypeHint: string;
@@ -48,7 +54,13 @@ interface VerifyIdInput {
   backFile?: File;
 }
 
-const SYSTEM_PROMPT = `You are an identity document analyzer.
+interface VerifyPorInput {
+  countryHint: string;
+  documentTypeHint: string;
+  documentFile: File;
+}
+
+const POI_SYSTEM_PROMPT = `You are an identity document analyzer for POI (Proof of Identity).
 You receive a user-entered English full name plus the front image of an ID and sometimes the back image, plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
@@ -59,27 +71,53 @@ Rules:
 - All confidence values must be numbers between 0 and 1.
 - Keep manual_review_required false when optional fields are simply absent on the document.
 - Only set manual_review_required to true when image quality or core name evidence is too weak for reliable verification.
-- country_detected should use ISO 3166-1 alpha-2 when confident, otherwise "".
+- issued_country should be a country name consistent with the document and user hint when confident, otherwise "".
 - date_of_birth must be normalized to YYYY-MM-DD when confident, otherwise "".
 - date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
-- Keep the original local-script names separate from romanized names.
+- Keep standardized values separate from the local OCR values.
+- local_full_name should preserve the original local-script full name when visible.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
 - If name order is ambiguous, explain it in romanization_notes.
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
-- Use the document type and issuing country as strong hints when they are consistent with the image.
 - The first image is always the front side. When a second image is provided, treat it as the back side of the same document.
 - Use the back side for fields that may only appear there, but do not invent fields if neither side shows them.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
-export async function verifyIdDocument({
+const POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
+You receive one residence-proof document image plus the user-selected document type and issuing country.
+Return only JSON that matches the provided schema.
+
+Rules:
+- Do not invent invisible values.
+- Unknown strings must be "".
+- Unknown arrays must be [].
+- All confidence values must be numbers between 0 and 1.
+- Keep standardized values separate from local OCR values.
+- issued_country should be a country name consistent with the document and user hint when confident, otherwise "".
+- document_type should be a short English label.
+- date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
+- postal_code must only be returned when it is explicitly visible on the document. Never infer or guess it from the address.
+- local_full_address should preserve the original OCR address string when visible.
+- address_notes should explain any segmentation ambiguity.
+- For Japanese addresses:
+  - country should be JAPAN.
+  - state should be prefecture only.
+  - city should contain the city/ward/district level. If both city and ward appear, include both in city.
+  - address_1 should contain town or neighborhood only, without block/building/room.
+  - address_2 should contain numbers, building names, and room numbers.
+  - Standardized country/state/city/address_1/address_2 should be returned in uppercase Latin characters when possible.
+- Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
+- If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
+
+export async function verifyPoiDocument({
   englishName,
   countryHint,
   documentTypeHint,
   frontFile,
   backFile,
-}: VerifyIdInput): Promise<VerificationResult> {
-  validateInputs({
+}: VerifyPoiInput): Promise<PoiVerificationResult> {
+  validatePoiInputs({
     englishName,
     countryHint,
     documentTypeHint,
@@ -97,7 +135,7 @@ export async function verifyIdDocument({
     ...(backBuffer && backFile ? [inspectImageQuality(backBuffer, backFile.size)] : []),
   ]);
 
-  const extraction = await extractWithOpenAI({
+  const extraction = await extractPoiWithOpenAI({
     englishName,
     countryHint,
     documentTypeHint,
@@ -107,146 +145,263 @@ export async function verifyIdDocument({
     backBuffer,
   });
 
-  const cleanedExtraction = sanitizeExtraction(extraction, englishName);
+  const cleaned = sanitizePoiExtraction(extraction, englishName);
   const gender = resolveGenderExtraction({
-    countryDetected: cleanedExtraction.country_detected,
-    gender: cleanedExtraction.gender,
-    genderConfidence: cleanedExtraction.gender_confidence,
-    genderSource: cleanedExtraction.gender_source,
-    genderEvidence: cleanedExtraction.gender_evidence,
-    genderNotes: cleanedExtraction.gender_notes,
+    countryDetected: cleaned.issued_country,
+    gender: cleaned.gender,
+    genderConfidence: cleaned.gender_confidence,
+    genderSource: cleaned.gender_source,
+    genderEvidence: cleaned.gender_evidence,
+    genderNotes: cleaned.gender_notes,
   });
 
-  const documentQualityConfidence = clampConfidence(
-    Math.min(
-      cleanedExtraction.document_quality_confidence * 0.75 +
-        localImageQuality.confidence * 0.25,
-      localImageQuality.notes.length
-        ? localImageQuality.confidence + 0.08
-        : cleanedExtraction.document_quality_confidence,
-    ),
+  const documentQualityConfidence = mergeDocumentQualityConfidence(
+    cleaned.document_quality_confidence,
+    localImageQuality.confidence,
+    localImageQuality.notes.length > 0,
   );
 
   const nameEvidenceConfidence = averageConfidence([
-    cleanedExtraction.first_name_confidence,
-    cleanedExtraction.last_name_confidence,
-    cleanedExtraction.middle_name
-      ? cleanedExtraction.middle_name_confidence
-      : undefined,
-    cleanedExtraction.overall_confidence,
+    cleaned.first_name_confidence,
+    cleaned.last_name_confidence,
+    cleaned.middle_name ? cleaned.middle_name_confidence : undefined,
+    cleaned.overall_confidence,
     documentQualityConfidence,
   ]);
 
   const nameMatch = matchRomanizedName({
     userInput: englishName,
-    primaryRomanization: cleanedExtraction.romanization_primary_full_name,
-    alternativeRomanizations: cleanedExtraction.romanization_alternatives,
-    firstName: cleanedExtraction.first_name,
-    middleName: cleanedExtraction.middle_name,
-    lastName: cleanedExtraction.last_name,
+    primaryRomanization: cleaned.romanization_primary_full_name,
+    alternativeRomanizations: cleaned.romanization_alternatives,
+    firstName: cleaned.first_name,
+    middleName: cleaned.middle_name,
+    lastName: cleaned.last_name,
     evidenceConfidence: nameEvidenceConfidence,
     documentQualityConfidence,
-    romanizationNotes: [
-      cleanedExtraction.romanization_notes,
-      cleanedExtraction.document_quality_notes,
-    ]
+    romanizationNotes: [cleaned.romanization_notes, cleaned.document_quality_notes]
       .filter(Boolean)
       .join(" "),
   });
 
   const warnings = uniqueStrings([
-    ...cleanedExtraction.warnings,
+    ...cleaned.warnings,
     ...localImageQuality.warnings,
-    ...buildDerivedWarnings(cleanedExtraction, {
+    ...buildPoiWarnings(cleaned, {
       documentQualityConfidence,
       genderWasHeldBack: !gender.gender,
       nameMatchReason: nameMatch.reason,
     }),
   ]);
 
-  const documentQualityNotes = uniqueStrings([
-    cleanedExtraction.document_quality_notes,
-    ...localImageQuality.notes,
-  ]).join(" ");
-
   const overallConfidence = clampConfidence(
     averageConfidence([
-      cleanedExtraction.overall_confidence,
+      cleaned.overall_confidence,
       documentQualityConfidence,
       nameMatch.confidence,
-      cleanedExtraction.first_name_confidence,
-      cleanedExtraction.last_name_confidence,
-      cleanedExtraction.document_number_confidence,
-      cleanedExtraction.date_of_birth_confidence,
-      cleanedExtraction.date_of_expiry_confidence,
-      cleanedExtraction.nationality_confidence,
-      gender.gender
-        ? gender.gender_confidence
-        : cleanedExtraction.gender_confidence > 0
-          ? 0.35
-          : undefined,
+      cleaned.document_type_confidence,
+      cleaned.issued_country_confidence,
+      cleaned.document_number_confidence,
+      cleaned.date_of_expiry_confidence,
+      cleaned.first_name_confidence,
+      cleaned.last_name_confidence,
+      cleaned.date_of_birth_confidence,
+      cleaned.place_of_birth_confidence,
+      cleaned.nationality_confidence,
     ]),
   );
 
-  const manualReviewRequired =
-    nameMatch.result === "manual_review" ||
-    documentQualityConfidence < 0.55;
-
   return {
-    user_input_english_name: englishName,
-    country_detected: cleanedExtraction.country_detected || countryHint.trim(),
-    document_type_detected:
-      cleanedExtraction.document_type_detected || documentTypeHint.trim(),
+    kind: "poi",
+    user_input_english_name: englishName.trim(),
+    document_type: cleaned.document_type || documentTypeHint.trim(),
+    local_document_type: cleaned.local_document_type,
+    document_type_confidence: cleaned.document_type_confidence,
+    document_number: cleaned.document_number,
+    local_document_number: cleaned.local_document_number,
+    document_number_confidence: cleaned.document_number_confidence,
+    issued_country: cleaned.issued_country || countryHint.trim(),
+    local_issued_country: cleaned.local_issued_country,
+    issued_country_confidence: cleaned.issued_country_confidence,
+    date_of_expiry: cleaned.date_of_expiry,
+    local_date_of_expiry: cleaned.local_date_of_expiry,
+    date_of_expiry_confidence: cleaned.date_of_expiry_confidence,
     document_quality_confidence: documentQualityConfidence,
     document_quality_notes:
-      documentQualityNotes ||
-      "No additional image-quality issues were detected by the local heuristic.",
-    first_name: cleanedExtraction.first_name,
-    local_first_name: cleanedExtraction.local_first_name,
-    first_name_confidence: cleanedExtraction.first_name_confidence,
-    local_first_name_confidence: cleanedExtraction.local_first_name_confidence,
-    last_name: cleanedExtraction.last_name,
-    local_last_name: cleanedExtraction.local_last_name,
-    last_name_confidence: cleanedExtraction.last_name_confidence,
-    local_last_name_confidence: cleanedExtraction.local_last_name_confidence,
-    middle_name: cleanedExtraction.middle_name,
-    local_middle_name: cleanedExtraction.local_middle_name,
-    middle_name_confidence: cleanedExtraction.middle_name_confidence,
-    local_middle_name_confidence: cleanedExtraction.local_middle_name_confidence,
+      uniqueStrings([cleaned.document_quality_notes, ...localImageQuality.notes]).join(
+        " ",
+      ) || "No additional image-quality issues were detected by the local heuristic.",
+    first_name: cleaned.first_name,
+    local_first_name: cleaned.local_first_name,
+    first_name_confidence: cleaned.first_name_confidence,
+    local_first_name_confidence: cleaned.local_first_name_confidence,
+    last_name: cleaned.last_name,
+    local_last_name: cleaned.local_last_name,
+    last_name_confidence: cleaned.last_name_confidence,
+    local_last_name_confidence: cleaned.local_last_name_confidence,
+    middle_name: cleaned.middle_name,
+    local_middle_name: cleaned.local_middle_name,
+    middle_name_confidence: cleaned.middle_name_confidence,
+    local_middle_name_confidence: cleaned.local_middle_name_confidence,
+    local_full_name: cleaned.local_full_name,
+    local_full_name_confidence: cleaned.local_full_name_confidence,
     gender: gender.gender,
+    local_gender: cleaned.local_gender,
     gender_confidence: gender.gender_confidence,
     gender_source: gender.gender_source,
     gender_evidence: gender.gender_evidence,
     gender_notes: gender.gender_notes,
-    document_number: cleanedExtraction.document_number,
-    document_number_confidence: cleanedExtraction.document_number_confidence,
-    date_of_birth: cleanedExtraction.date_of_birth,
-    date_of_birth_confidence: cleanedExtraction.date_of_birth_confidence,
-    date_of_expiry: cleanedExtraction.date_of_expiry,
-    date_of_expiry_confidence: cleanedExtraction.date_of_expiry_confidence,
-    place_of_birth: cleanedExtraction.place_of_birth,
-    place_of_birth_confidence: cleanedExtraction.place_of_birth_confidence,
-    nationality: cleanedExtraction.nationality,
-    nationality_confidence: cleanedExtraction.nationality_confidence,
-    romanization_primary_full_name: cleanedExtraction.romanization_primary_full_name,
-    romanization_alternatives: cleanedExtraction.romanization_alternatives,
-    romanization_notes: cleanedExtraction.romanization_notes,
+    date_of_birth: cleaned.date_of_birth,
+    local_date_of_birth: cleaned.local_date_of_birth,
+    date_of_birth_confidence: cleaned.date_of_birth_confidence,
+    place_of_birth: cleaned.place_of_birth,
+    local_place_of_birth: cleaned.local_place_of_birth,
+    place_of_birth_confidence: cleaned.place_of_birth_confidence,
+    nationality: cleaned.nationality,
+    local_nationality: cleaned.local_nationality,
+    nationality_confidence: cleaned.nationality_confidence,
+    romanization_primary_full_name: cleaned.romanization_primary_full_name,
+    romanization_alternatives: cleaned.romanization_alternatives,
+    romanization_notes: cleaned.romanization_notes,
     name_match_result: nameMatch.result,
     name_match_confidence: nameMatch.confidence,
     name_match_reason: nameMatch.reason,
     overall_confidence: overallConfidence,
-    manual_review_required: manualReviewRequired,
+    manual_review_required:
+      nameMatch.result === "manual_review" || documentQualityConfidence < 0.55,
     warnings,
   };
 }
 
-function validateInputs({
+export async function verifyPorDocument({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+}: VerifyPorInput): Promise<PorVerificationResult> {
+  validatePorInputs({ countryHint, documentTypeHint, documentFile });
+
+  const buffer = Buffer.from(await documentFile.arrayBuffer());
+  const localImageQuality = inspectImageQuality(buffer, documentFile.size);
+  const extraction = await extractPorWithOpenAI({
+    countryHint,
+    documentTypeHint,
+    documentFile,
+    buffer,
+  });
+
+  const cleaned = sanitizePorExtraction(extraction);
+  const documentQualityConfidence = mergeDocumentQualityConfidence(
+    cleaned.document_quality_confidence,
+    localImageQuality.confidence,
+    localImageQuality.notes.length > 0,
+  );
+
+  const postalLookup =
+    !cleaned.postal_code || cleaned.postal_code_confidence < 0.55
+      ? await lookupJapanPostalCode({
+          issuedCountry: cleaned.issued_country || countryHint.trim(),
+          country: cleaned.country,
+          localCountry: cleaned.local_country,
+          localState: cleaned.local_state,
+          localCity: cleaned.local_city,
+          localAddress1: cleaned.local_address_1,
+          localAddress2: cleaned.local_address_2,
+        })
+      : { postalCode: "", confidence: 0, source: "none" as const };
+
+  const finalPostalCode = cleaned.postal_code || postalLookup.postalCode;
+  const finalPostalCodeConfidence = cleaned.postal_code
+    ? cleaned.postal_code_confidence
+    : postalLookup.postalCode
+      ? postalLookup.confidence
+      : cleaned.postal_code_confidence;
+
+  const warnings = uniqueStrings([
+    ...cleaned.warnings,
+    ...localImageQuality.warnings,
+    ...buildPorWarnings(cleaned, {
+      documentQualityConfidence,
+      postalLookupWarning: postalLookup.warning ?? "",
+      hasPostalCode: Boolean(finalPostalCode),
+    }),
+  ]);
+
+  const overallConfidence = clampConfidence(
+    averageConfidence([
+      cleaned.overall_confidence,
+      documentQualityConfidence,
+      cleaned.document_type_confidence,
+      cleaned.issued_country_confidence,
+      cleaned.document_number_confidence,
+      cleaned.date_of_expiry_confidence,
+      cleaned.country_confidence,
+      cleaned.state_confidence,
+      cleaned.city_confidence,
+      cleaned.address_1_confidence,
+      cleaned.address_2_confidence,
+      finalPostalCodeConfidence,
+    ]),
+  );
+
+  return {
+    kind: "por",
+    document_type: cleaned.document_type || documentTypeHint.trim(),
+    local_document_type: cleaned.local_document_type,
+    document_type_confidence: cleaned.document_type_confidence,
+    document_number: cleaned.document_number,
+    local_document_number: cleaned.local_document_number,
+    document_number_confidence: cleaned.document_number_confidence,
+    issued_country: cleaned.issued_country || countryHint.trim(),
+    local_issued_country: cleaned.local_issued_country,
+    issued_country_confidence: cleaned.issued_country_confidence,
+    date_of_expiry: cleaned.date_of_expiry,
+    local_date_of_expiry: cleaned.local_date_of_expiry,
+    date_of_expiry_confidence: cleaned.date_of_expiry_confidence,
+    document_quality_confidence: documentQualityConfidence,
+    document_quality_notes:
+      uniqueStrings([cleaned.document_quality_notes, ...localImageQuality.notes]).join(
+        " ",
+      ) || "No additional image-quality issues were detected by the local heuristic.",
+    country: cleaned.country,
+    local_country: cleaned.local_country,
+    country_confidence: cleaned.country_confidence,
+    state: cleaned.state,
+    local_state: cleaned.local_state,
+    state_confidence: cleaned.state_confidence,
+    city: cleaned.city,
+    local_city: cleaned.local_city,
+    city_confidence: cleaned.city_confidence,
+    address_1: cleaned.address_1,
+    local_address_1: cleaned.local_address_1,
+    address_1_confidence: cleaned.address_1_confidence,
+    address_2: cleaned.address_2,
+    local_address_2: cleaned.local_address_2,
+    address_2_confidence: cleaned.address_2_confidence,
+    postal_code: finalPostalCode,
+    local_postal_code: cleaned.local_postal_code,
+    postal_code_confidence: finalPostalCodeConfidence,
+    postal_code_source: cleaned.postal_code ? "ocr" : postalLookup.source,
+    local_full_address: cleaned.local_full_address,
+    local_full_address_confidence: cleaned.local_full_address_confidence,
+    address_notes: cleaned.address_notes,
+    overall_confidence: overallConfidence,
+    manual_review_required:
+      cleaned.manual_review_required ||
+      documentQualityConfidence < 0.55 ||
+      !cleaned.country ||
+      !cleaned.state ||
+      !cleaned.city ||
+      !cleaned.address_1,
+    warnings,
+  };
+}
+
+function validatePoiInputs({
   englishName,
   countryHint,
   documentTypeHint,
   frontFile,
   backFile,
-}: VerifyIdInput) {
+}: VerifyPoiInput) {
   if (!englishName.trim()) {
     throw new VerificationError(
       400,
@@ -278,7 +433,31 @@ function validateInputs({
   }
 }
 
-function validateImageFile(file: File, side: "front" | "back") {
+function validatePorInputs({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+}: VerifyPorInput) {
+  if (!documentTypeHint.trim()) {
+    throw new VerificationError(
+      400,
+      "Select the document type.",
+      "Document type is required.",
+    );
+  }
+
+  if (!countryHint.trim()) {
+    throw new VerificationError(
+      400,
+      "Select the issued country.",
+      "Issued country is required.",
+    );
+  }
+
+  validateImageFile(documentFile, "document");
+}
+
+function validateImageFile(file: File, side: "front" | "back" | "document") {
   if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
     throw new VerificationError(
       400,
@@ -296,7 +475,7 @@ function validateImageFile(file: File, side: "front" | "back") {
   }
 }
 
-async function extractWithOpenAI({
+async function extractPoiWithOpenAI({
   englishName,
   countryHint,
   documentTypeHint,
@@ -304,19 +483,22 @@ async function extractWithOpenAI({
   backFile,
   frontBuffer,
   backBuffer,
-}: VerifyIdInput & { frontBuffer: Buffer; backBuffer?: Buffer }) {
-  const client = getOpenAIClient();
-  const modelCandidates = getModelCandidates();
+}: VerifyPoiInput & { frontBuffer: Buffer; backBuffer?: Buffer }) {
+  const userPrompt = [
+    `User entered English full name: ${englishName.trim()}`,
+    `Issued country: ${countryHint.trim()}`,
+    `Document type: ${documentTypeHint.trim()}`,
+    "Analyze the POI document images and extract the requested fields.",
+    "The first uploaded image is the front side.",
+    backFile && backBuffer
+      ? "A second uploaded image is provided for the back side."
+      : "No back-side image is provided.",
+    "Return local OCR text separately whenever it exists.",
+    "Do not infer gender without visible OCR label/value evidence.",
+  ].join("\n");
+
   const inputContent = [
-    {
-      type: "input_text" as const,
-      text: buildUserPrompt({
-        englishName,
-        countryHint,
-        documentTypeHint,
-        hasBackImage: Boolean(backFile && backBuffer),
-      }),
-    },
+    { type: "input_text" as const, text: userPrompt },
     {
       type: "input_image" as const,
       image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
@@ -333,25 +515,76 @@ async function extractWithOpenAI({
       : []),
   ];
 
+  return executeOpenAiParse({
+    schemaName: "poi_document_verification",
+    inputContent,
+    systemPrompt: POI_SYSTEM_PROMPT,
+    schema: openAiPoiExtractionSchema,
+  }) as Promise<OpenAiPoiExtraction>;
+}
+
+async function extractPorWithOpenAI({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+  buffer,
+}: VerifyPorInput & { buffer: Buffer }) {
+  const userPrompt = [
+    `Issued country: ${countryHint.trim()}`,
+    `Document type: ${documentTypeHint.trim()}`,
+    "Analyze the POR document image and extract the requested fields.",
+    "Return local OCR text separately whenever it exists.",
+    "Do not guess postal_code from the address. Leave it blank unless it is explicitly visible.",
+  ].join("\n");
+
+  const inputContent = [
+    { type: "input_text" as const, text: userPrompt },
+    {
+      type: "input_image" as const,
+      image_url: `data:${documentFile.type};base64,${buffer.toString("base64")}`,
+      detail: "high" as const,
+    },
+  ];
+
+  return executeOpenAiParse({
+    schemaName: "por_document_verification",
+    inputContent,
+    systemPrompt: POR_SYSTEM_PROMPT,
+    schema: openAiPorExtractionSchema,
+  }) as Promise<OpenAiPorExtraction>;
+}
+
+async function executeOpenAiParse({
+  schemaName,
+  inputContent,
+  systemPrompt,
+  schema,
+}: {
+  schemaName: string;
+  inputContent: Array<
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; image_url: string; detail: "high" }
+  >;
+  systemPrompt: string;
+  schema:
+    | typeof openAiPoiExtractionSchema
+    | typeof openAiPorExtractionSchema;
+}) {
+  const client = getOpenAIClient();
+  const modelCandidates = getModelCandidates();
   let lastError: unknown;
 
   for (const model of modelCandidates) {
     try {
       const response = await client.responses.parse({
         model,
-        max_output_tokens: 1800,
+        max_output_tokens: 2200,
         input: [
-          {
-            role: "system",
-            content: SYSTEM_PROMPT,
-          },
-          {
-            role: "user",
-            content: inputContent,
-          },
+          { role: "system", content: systemPrompt },
+          { role: "user", content: inputContent },
         ],
         text: {
-          format: zodTextFormat(openAiExtractionSchema, "id_document_verification"),
+          format: zodTextFormat(schema, schemaName),
         },
       });
 
@@ -376,37 +609,25 @@ async function extractWithOpenAI({
   throw mapOpenAIError(lastError, modelCandidates);
 }
 
-function buildUserPrompt({
-  englishName,
-  countryHint,
-  documentTypeHint,
-  hasBackImage,
-}: Omit<VerifyIdInput, "frontFile" | "backFile"> & { hasBackImage: boolean }) {
-  return [
-    `User entered English full name: ${englishName.trim()}`,
-    `Issued country: ${countryHint.trim()}`,
-    `Document type: ${documentTypeHint.trim()}`,
-    "Analyze the ID images and extract the required fields.",
-    "The first uploaded image is the front side.",
-    hasBackImage
-      ? "A second uploaded image is provided for the back side."
-      : "No back-side image is provided.",
-    "Keep unknown strings as empty strings and unknown arrays as empty arrays.",
-    "Do not set manual_review_required to true only because optional fields are absent on the document.",
-    "Return the document number when visible. If unreadable, return an empty string.",
-    "Return the date of expiry when visible and normalize it to YYYY-MM-DD.",
-    "Provide a primary romanized full name and any credible alternatives.",
-    "Do not infer gender without visible OCR label/value evidence.",
-  ].join("\n");
-}
-
-function sanitizeExtraction(extraction: OpenAiExtraction, englishName: string) {
-  const normalizedDate = normalizeDateValue(extraction.date_of_birth);
-  const normalizedExpiry = normalizeDateValue(extraction.date_of_expiry);
+function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: string) {
+  const normalizedDateOfBirth = normalizeDateValue(extraction.date_of_birth);
+  const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
 
   return {
-    country_detected: cleanText(extraction.country_detected),
-    document_type_detected: cleanText(extraction.document_type_detected),
+    document_type: cleanText(extraction.document_type),
+    local_document_type: cleanText(extraction.local_document_type),
+    document_type_confidence: clampConfidence(extraction.document_type_confidence),
+    document_number: cleanText(extraction.document_number),
+    local_document_number: cleanText(extraction.local_document_number),
+    document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    issued_country: cleanText(extraction.issued_country),
+    local_issued_country: cleanText(extraction.local_issued_country),
+    issued_country_confidence: clampConfidence(extraction.issued_country_confidence),
+    date_of_expiry: normalizedDateOfExpiry,
+    local_date_of_expiry: cleanText(extraction.local_date_of_expiry),
+    date_of_expiry_confidence: normalizedDateOfExpiry
+      ? clampConfidence(extraction.date_of_expiry_confidence)
+      : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
     document_quality_confidence: clampConfidence(extraction.document_quality_confidence),
     document_quality_notes: cleanText(extraction.document_quality_notes),
     first_name: cleanText(extraction.first_name),
@@ -420,31 +641,27 @@ function sanitizeExtraction(extraction: OpenAiExtraction, englishName: string) {
     middle_name: cleanText(extraction.middle_name),
     local_middle_name: cleanText(extraction.local_middle_name),
     middle_name_confidence: clampConfidence(extraction.middle_name_confidence),
-    local_middle_name_confidence: clampConfidence(
-      extraction.local_middle_name_confidence,
-    ),
+    local_middle_name_confidence: clampConfidence(extraction.local_middle_name_confidence),
+    local_full_name: cleanText(extraction.local_full_name),
+    local_full_name_confidence: clampConfidence(extraction.local_full_name_confidence),
     gender: extraction.gender,
+    local_gender: cleanText(extraction.local_gender),
     gender_confidence: clampConfidence(extraction.gender_confidence),
     gender_source: extraction.gender_source,
     gender_evidence: cleanText(extraction.gender_evidence),
     gender_notes: cleanText(extraction.gender_notes),
-    document_number: cleanText(extraction.document_number),
-    document_number_confidence: clampConfidence(extraction.document_number_confidence),
-    date_of_birth: normalizedDate,
-    date_of_birth_confidence: normalizedDate
+    date_of_birth: normalizedDateOfBirth,
+    local_date_of_birth: cleanText(extraction.local_date_of_birth),
+    date_of_birth_confidence: normalizedDateOfBirth
       ? clampConfidence(extraction.date_of_birth_confidence)
       : clampConfidence(Math.min(extraction.date_of_birth_confidence, 0.35)),
-    date_of_expiry: normalizedExpiry,
-    date_of_expiry_confidence: normalizedExpiry
-      ? clampConfidence(extraction.date_of_expiry_confidence)
-      : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
     place_of_birth: cleanText(extraction.place_of_birth),
+    local_place_of_birth: cleanText(extraction.local_place_of_birth),
     place_of_birth_confidence: clampConfidence(extraction.place_of_birth_confidence),
     nationality: cleanText(extraction.nationality),
+    local_nationality: cleanText(extraction.local_nationality),
     nationality_confidence: clampConfidence(extraction.nationality_confidence),
-    romanization_primary_full_name: cleanText(
-      extraction.romanization_primary_full_name,
-    ),
+    romanization_primary_full_name: cleanText(extraction.romanization_primary_full_name),
     romanization_alternatives: uniqueNameList(
       extraction.romanization_alternatives
         .map((value) => cleanText(value))
@@ -459,6 +676,126 @@ function sanitizeExtraction(extraction: OpenAiExtraction, englishName: string) {
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
+}
+
+function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
+  const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
+  const normalizedPostalCode = normalizePostalCode(extraction.postal_code);
+
+  return {
+    document_type: cleanText(extraction.document_type),
+    local_document_type: cleanText(extraction.local_document_type),
+    document_type_confidence: clampConfidence(extraction.document_type_confidence),
+    document_number: cleanText(extraction.document_number),
+    local_document_number: cleanText(extraction.local_document_number),
+    document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    issued_country: cleanText(extraction.issued_country),
+    local_issued_country: cleanText(extraction.local_issued_country),
+    issued_country_confidence: clampConfidence(extraction.issued_country_confidence),
+    date_of_expiry: normalizedDateOfExpiry,
+    local_date_of_expiry: cleanText(extraction.local_date_of_expiry),
+    date_of_expiry_confidence: normalizedDateOfExpiry
+      ? clampConfidence(extraction.date_of_expiry_confidence)
+      : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
+    document_quality_confidence: clampConfidence(extraction.document_quality_confidence),
+    document_quality_notes: cleanText(extraction.document_quality_notes),
+    country: cleanUppercaseText(extraction.country),
+    local_country: cleanText(extraction.local_country),
+    country_confidence: clampConfidence(extraction.country_confidence),
+    state: cleanUppercaseText(extraction.state),
+    local_state: cleanText(extraction.local_state),
+    state_confidence: clampConfidence(extraction.state_confidence),
+    city: cleanUppercaseText(extraction.city),
+    local_city: cleanText(extraction.local_city),
+    city_confidence: clampConfidence(extraction.city_confidence),
+    address_1: cleanUppercaseText(extraction.address_1),
+    local_address_1: cleanText(extraction.local_address_1),
+    address_1_confidence: clampConfidence(extraction.address_1_confidence),
+    address_2: cleanUppercaseText(extraction.address_2),
+    local_address_2: cleanText(extraction.local_address_2),
+    address_2_confidence: clampConfidence(extraction.address_2_confidence),
+    postal_code: normalizedPostalCode,
+    local_postal_code: cleanText(extraction.local_postal_code),
+    postal_code_confidence: normalizedPostalCode
+      ? clampConfidence(extraction.postal_code_confidence)
+      : clampConfidence(Math.min(extraction.postal_code_confidence, 0.35)),
+    local_full_address: cleanText(extraction.local_full_address),
+    local_full_address_confidence: clampConfidence(extraction.local_full_address_confidence),
+    address_notes: cleanText(extraction.address_notes),
+    overall_confidence: clampConfidence(extraction.overall_confidence),
+    manual_review_required: extraction.manual_review_required,
+    warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
+  };
+}
+
+function buildPoiWarnings(
+  extraction: ReturnType<typeof sanitizePoiExtraction>,
+  {
+    documentQualityConfidence,
+    genderWasHeldBack,
+    nameMatchReason,
+  }: {
+    documentQualityConfidence: number;
+    genderWasHeldBack: boolean;
+    nameMatchReason: string;
+  },
+) {
+  const warnings: string[] = [];
+
+  if (documentQualityConfidence < 0.55) {
+    warnings.push("Image quality is low; manual review is recommended.");
+  }
+
+  if (!extraction.romanization_primary_full_name) {
+    warnings.push("The primary romanized full name could not be extracted confidently.");
+  }
+
+  if (!extraction.date_of_birth) {
+    warnings.push("Date of birth could not be standardized confidently.");
+  }
+
+  if (genderWasHeldBack) {
+    warnings.push("Gender was withheld because direct OCR evidence was insufficient.");
+  }
+
+  if (nameMatchReason.toLowerCase().includes("manual review")) {
+    warnings.push("Name comparison requires manual review.");
+  }
+
+  return warnings;
+}
+
+function buildPorWarnings(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  {
+    documentQualityConfidence,
+    postalLookupWarning,
+    hasPostalCode,
+  }: {
+    documentQualityConfidence: number;
+    postalLookupWarning: string;
+    hasPostalCode: boolean;
+  },
+) {
+  const warnings: string[] = [];
+
+  if (documentQualityConfidence < 0.55) {
+    warnings.push("Image quality is low; manual review is recommended.");
+  }
+
+  if (!extraction.country || !extraction.state || !extraction.city || !extraction.address_1) {
+    warnings.push("Core address fields could not be segmented confidently.");
+  }
+
+  if (!hasPostalCode) {
+    warnings.push("Postal code could not be confirmed from OCR or lookup.");
+  }
+
+  if (postalLookupWarning) {
+    warnings.push(postalLookupWarning);
+  }
+
+  return warnings;
 }
 
 function cleanText(value: string) {
@@ -481,6 +818,11 @@ function cleanText(value: string) {
   ]);
 
   return blockedValues.has(normalized) ? "" : trimmed;
+}
+
+function cleanUppercaseText(value: string) {
+  const cleaned = cleanText(value);
+  return /[a-z]/i.test(cleaned) ? cleaned.toUpperCase() : cleaned;
 }
 
 function normalizeDateValue(value: string) {
@@ -522,6 +864,16 @@ function normalizeDateValue(value: string) {
   return "";
 }
 
+function normalizePostalCode(value: string) {
+  const digits = cleanText(value).replace(/\D/g, "");
+
+  if (digits.length !== 7) {
+    return "";
+  }
+
+  return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+}
+
 function formatDate(year: string, month: string, day: string) {
   const safeMonth = Number(month);
   const safeDay = Number(day);
@@ -542,41 +894,17 @@ function formatDate(year: string, month: string, day: string) {
   ).padStart(2, "0")}`;
 }
 
-function buildDerivedWarnings(
-  extraction: ReturnType<typeof sanitizeExtraction>,
-  {
-    documentQualityConfidence,
-    genderWasHeldBack,
-    nameMatchReason,
-  }: {
-    documentQualityConfidence: number;
-    genderWasHeldBack: boolean;
-    nameMatchReason: string;
-  },
+function mergeDocumentQualityConfidence(
+  extractedConfidence: number,
+  localConfidence: number,
+  hasLocalNotes: boolean,
 ) {
-  const warnings: string[] = [];
-
-  if (documentQualityConfidence < 0.55) {
-    warnings.push("Image quality is low; manual review is recommended.");
-  }
-
-  if (!extraction.romanization_primary_full_name) {
-    warnings.push("The primary romanized full name could not be extracted confidently.");
-  }
-
-  if (!extraction.date_of_birth) {
-    warnings.push("Date of birth could not be standardized confidently.");
-  }
-
-  if (genderWasHeldBack) {
-    warnings.push("Gender was withheld because direct OCR evidence was insufficient.");
-  }
-
-  if (nameMatchReason.toLowerCase().includes("manual review")) {
-    warnings.push("Name comparison requires manual review.");
-  }
-
-  return warnings;
+  return clampConfidence(
+    Math.min(
+      extractedConfidence * 0.75 + localConfidence * 0.25,
+      hasLocalNotes ? localConfidence + 0.08 : extractedConfidence,
+    ),
+  );
 }
 
 function combineImageQualityChecks(
@@ -630,7 +958,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (!(error instanceof Error)) {
     return new VerificationError(
       502,
-      "An unknown OpenAI error occurred while analyzing the ID images.",
+      "An unknown OpenAI error occurred while analyzing the document.",
       "Unknown OpenAI error.",
     );
   }
@@ -749,8 +1077,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
 
   if (
     status === 400 &&
-    (message.includes("content policy") ||
-      code === "content_policy_violation")
+    (message.includes("content policy") || code === "content_policy_violation")
   ) {
     return new VerificationError(
       400,
@@ -798,7 +1125,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
 
   return new VerificationError(
     status >= 400 && status < 600 ? status : 502,
-    `OpenAI failed while analyzing the ID images. Check the request settings and uploaded files.${formatDetailSuffix(
+    `OpenAI failed while analyzing the document. Check the request settings and uploaded files.${formatDetailSuffix(
       status,
       code,
     )}`,

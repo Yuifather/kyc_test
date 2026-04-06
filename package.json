@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "image-size": "^2.0.2",
     "next": "16.2.2",
     "openai": "^6.33.0",

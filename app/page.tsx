@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { CountryCombobox } from "@/components/country-combobox";
 import { VerificationResults } from "@/components/verification-results";
 import { findCountryOption } from "@/lib/country-options";
-import type { VerificationResult } from "@/types/verification";
+import type { VerificationKind, VerificationResult } from "@/types/verification";
 
 const ACCEPTED_IMAGE_TYPES = [
   "image/jpeg",
@@ -16,7 +16,7 @@ const ACCEPTED_IMAGE_TYPES = [
   "image/heif",
 ].join(",");
 
-const DOCUMENT_TYPE_OPTIONS = [
+const POI_DOCUMENT_TYPE_OPTIONS = [
   { value: "", label: "Select..." },
   { value: "Passport", label: "Passport" },
   { value: "ID Card", label: "ID Card" },
@@ -24,28 +24,88 @@ const DOCUMENT_TYPE_OPTIONS = [
   { value: "Other Document", label: "Other Document" },
 ];
 
+const POR_DOCUMENT_TYPE_OPTIONS = [
+  { value: "", label: "Select..." },
+  {
+    value: "Utility bill (e.g. electricity, water, gas, etc.)",
+    label: "Utility bill (e.g. electricity water, gas, etc...)",
+  },
+  { value: "Bills", label: "Bills" },
+  { value: "Bank account statement", label: "Bank account statement" },
+  { value: "Credit card statement", label: "Credit card statement" },
+  { value: "Residence permit", label: "Residence permit" },
+  { value: "Residence certificate", label: "Residence certificate" },
+  { value: "Tax bill", label: "Tax bill" },
+  { value: "Tax return", label: "Tax return" },
+  {
+    value: "Any government issued document",
+    label: "Any government issued document",
+  },
+  {
+    value: "Passport, ID card, or driver's license (if showing address)",
+    label: "Passport, ID card, or driver's license (if showing address)",
+  },
+  { value: "ID Card", label: "ID Card" },
+  { value: "Driver's License", label: "Driver's License" },
+  { value: "Other Document", label: "Other Document" },
+];
+
+const modeCopy: Record<
+  VerificationKind,
+  {
+    eyebrow: string;
+    title: string;
+    description: string;
+    buttonLabel: string;
+  }
+> = {
+  poi: {
+    eyebrow: "POI verification",
+    title: "Proof of identity OCR with name matching, local-script capture, and review-ready confidence.",
+    description:
+      "Enter the customer English name, select issuing country and document type, then upload front and optional back images of the identity document.",
+    buttonLabel: "Validate POI",
+  },
+  por: {
+    eyebrow: "POR verification",
+    title: "Proof of residence OCR with standardized address parsing and Japan Post postal-code lookup.",
+    description:
+      "Select the issuing country and POR document type, upload the document, and extract both standardized address fields and local OCR text.",
+    buttonLabel: "Validate POR",
+  },
+};
+
 export default function Home() {
-  const [englishName, setEnglishName] = useState("");
-  const [issuedCountry, setIssuedCountry] = useState("");
-  const [documentType, setDocumentType] = useState("");
+  const [verificationKind, setVerificationKind] = useState<VerificationKind>("poi");
+
+  const [poiEnglishName, setPoiEnglishName] = useState("");
+  const [poiIssuedCountry, setPoiIssuedCountry] = useState("");
+  const [poiDocumentType, setPoiDocumentType] = useState("");
   const [frontImageFile, setFrontImageFile] = useState<File | null>(null);
   const [backImageFile, setBackImageFile] = useState<File | null>(null);
   const [frontPreviewUrl, setFrontPreviewUrl] = useState("");
   const [backPreviewUrl, setBackPreviewUrl] = useState("");
+
+  const [porIssuedCountry, setPorIssuedCountry] = useState("");
+  const [porDocumentType, setPorDocumentType] = useState("");
+  const [porDocumentFile, setPorDocumentFile] = useState<File | null>(null);
+  const [porPreviewUrl, setPorPreviewUrl] = useState("");
+
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => () => {
-    if (frontPreviewUrl) {
-      URL.revokeObjectURL(frontPreviewUrl);
-    }
-
-    if (backPreviewUrl) {
-      URL.revokeObjectURL(backPreviewUrl);
-    }
-  }, [backPreviewUrl, frontPreviewUrl]);
+  useEffect(
+    () => () => {
+      for (const previewUrl of [frontPreviewUrl, backPreviewUrl, porPreviewUrl]) {
+        if (previewUrl) {
+          URL.revokeObjectURL(previewUrl);
+        }
+      }
+    },
+    [backPreviewUrl, frontPreviewUrl, porPreviewUrl],
+  );
 
   useEffect(() => {
     if (result) {
@@ -57,45 +117,93 @@ export default function Home() {
     event.preventDefault();
     setErrorMessage("");
 
-    if (!englishName.trim()) {
-      setErrorMessage("Enter the user's English full name.");
+    if (verificationKind === "poi") {
+      if (!poiEnglishName.trim()) {
+        setErrorMessage("Enter the user's English full name.");
+        return;
+      }
+
+      if (!poiDocumentType) {
+        setErrorMessage("Select the document type.");
+        return;
+      }
+
+      const canonicalIssuedCountry = findCountryOption(poiIssuedCountry);
+
+      if (!canonicalIssuedCountry) {
+        setErrorMessage("Select the issued country from the dropdown list.");
+        return;
+      }
+
+      if (!frontImageFile) {
+        setErrorMessage("Upload the front image of the ID.");
+        return;
+      }
+
+      await submitVerification({
+        verificationKind,
+        buildFormData: () => {
+          const formData = new FormData();
+          formData.append("verificationKind", "poi");
+          formData.append("englishName", poiEnglishName.trim());
+          formData.append("documentTypeHint", poiDocumentType);
+          formData.append("countryHint", canonicalIssuedCountry);
+          formData.append("frontImage", frontImageFile);
+
+          if (backImageFile) {
+            formData.append("backImage", backImageFile);
+          }
+
+          return formData;
+        },
+      });
+
       return;
     }
 
-    if (!documentType) {
+    if (!porDocumentType) {
       setErrorMessage("Select the document type.");
       return;
     }
 
-    const canonicalIssuedCountry = findCountryOption(issuedCountry);
+    const canonicalIssuedCountry = findCountryOption(porIssuedCountry);
 
     if (!canonicalIssuedCountry) {
       setErrorMessage("Select the issued country from the dropdown list.");
       return;
     }
 
-    if (!frontImageFile) {
-      setErrorMessage("Upload the front image of the ID.");
+    if (!porDocumentFile) {
+      setErrorMessage("Upload the POR document image.");
       return;
     }
 
+    await submitVerification({
+      verificationKind,
+      buildFormData: () => {
+        const formData = new FormData();
+        formData.append("verificationKind", "por");
+        formData.append("documentTypeHint", porDocumentType);
+        formData.append("countryHint", canonicalIssuedCountry);
+        formData.append("documentImage", porDocumentFile);
+        return formData;
+      },
+    });
+  }
+
+  async function submitVerification({
+    buildFormData,
+  }: {
+    verificationKind: VerificationKind;
+    buildFormData: () => FormData;
+  }) {
     setIsSubmitting(true);
     setResult(null);
 
     try {
-      const formData = new FormData();
-      formData.append("englishName", englishName.trim());
-      formData.append("documentTypeHint", documentType);
-      formData.append("countryHint", canonicalIssuedCountry);
-      formData.append("frontImage", frontImageFile);
-
-      if (backImageFile) {
-        formData.append("backImage", backImageFile);
-      }
-
       const response = await fetch("/api/verify-id", {
         method: "POST",
-        body: formData,
+        body: buildFormData(),
       });
 
       const payload = (await response.json()) as
@@ -118,6 +226,18 @@ export default function Home() {
     }
   }
 
+  function handleKindChange(nextKind: VerificationKind) {
+    if (nextKind === verificationKind) {
+      return;
+    }
+
+    setVerificationKind(nextKind);
+    setErrorMessage("");
+    setResult(null);
+  }
+
+  const activeCopy = modeCopy[verificationKind];
+
   return (
     <main className="relative isolate overflow-hidden">
       <div className="pointer-events-none absolute inset-x-0 top-0 h-[22rem] bg-[radial-gradient(circle_at_top_left,_rgba(23,124,104,0.23),_transparent_58%),radial-gradient(circle_at_top_right,_rgba(220,112,53,0.2),_transparent_48%)] sm:h-[26rem]" />
@@ -127,101 +247,83 @@ export default function Home() {
           <div>
             <div className="max-w-3xl">
               <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-teal-700 sm:text-xs sm:tracking-[0.32em]">
-                Server-side OCR verification
+                {activeCopy.eyebrow}
               </p>
-              <h1 className="mt-3 max-w-[13ch] text-balance text-[2rem] font-semibold leading-[1.03] text-stone-950 sm:mt-4 sm:max-w-none sm:text-5xl sm:leading-tight">
-                ID name match verification with OCR, romanization, and review-ready confidence.
+              <h1 className="mt-3 max-w-[15ch] text-balance text-[2rem] font-semibold leading-[1.03] text-stone-950 sm:mt-4 sm:max-w-none sm:text-5xl sm:leading-tight">
+                {activeCopy.title}
               </h1>
               <p className="mt-4 max-w-xl text-sm leading-6 text-stone-700 sm:mt-5 sm:max-w-2xl sm:text-lg sm:leading-8">
-                Enter the English name, choose the document type, search the issuing
-                country, and upload the front and optional back images of the ID to
-                compare the extracted romanized name against the user input.
+                {activeCopy.description}
               </p>
             </div>
 
+            <section className="mt-5 rounded-[1.5rem] border border-stone-200/80 bg-white/80 p-3 shadow-[0_16px_44px_rgba(34,31,23,0.07)] backdrop-blur sm:mt-8 sm:rounded-[1.8rem] sm:p-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <ModeCard
+                  active={verificationKind === "poi"}
+                  eyebrow="POI"
+                  title="Proof of Identity"
+                  description="Customer name, issued country, document type, and front/back identity images."
+                  onClick={() => handleKindChange("poi")}
+                />
+                <ModeCard
+                  active={verificationKind === "por"}
+                  eyebrow="POR"
+                  title="Proof of Residence"
+                  description="Issued country, POR document type, and address-proof upload with postal-code support."
+                  onClick={() => handleKindChange("por")}
+                />
+              </div>
+            </section>
+
             <form
               onSubmit={handleSubmit}
-              className="mt-5 rounded-[1.7rem] border border-stone-200/80 bg-white/85 p-4 shadow-[0_20px_60px_rgba(34,31,23,0.08)] backdrop-blur sm:mt-8 sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_80px_rgba(34,31,23,0.08)]"
+              className="mt-5 rounded-[1.7rem] border border-stone-200/80 bg-white/85 p-4 shadow-[0_20px_60px_rgba(34,31,23,0.08)] backdrop-blur sm:mt-6 sm:rounded-[2rem] sm:p-6 sm:shadow-[0_28px_80px_rgba(34,31,23,0.08)]"
             >
-              <div className="grid gap-6 md:grid-cols-2">
-                <FormField
-                  label="User Entered English Full Name"
-                  description="Required. This is the name that will be matched against OCR + romanization output."
-                >
-                  <input
-                    value={englishName}
-                    onChange={(event) => setEnglishName(event.target.value)}
-                    placeholder="Giljung Kim"
-                    className={inputClassName}
-                    autoComplete="off"
-                  />
-                </FormField>
-
-                <FormField
-                  label="Document type"
-                  description="Required. Select the type that matches the uploaded image."
-                >
-                  <select
-                    value={documentType}
-                    onChange={(event) => setDocumentType(event.target.value)}
-                    className={inputClassName}
-                  >
-                    {DOCUMENT_TYPE_OPTIONS.map((option) => (
-                      <option key={option.label} value={option.value} disabled={!option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </FormField>
-
-                <FormField
-                  label="Issued country"
-                  description="Required. Search and select the issuing country from the supported list."
-                >
-                  <CountryCombobox
-                    value={issuedCountry}
-                    onChange={setIssuedCountry}
-                    placeholder="Type to search countries"
-                    className={inputClassName}
-                  />
-                </FormField>
-
-                <FormField
-                  label="Front ID Image"
-                  description="Required. Upload the front photo or scan of the ID document."
-                >
-                  <FileUploadCard
-                    file={frontImageFile}
-                    emptyLabel="Choose the front image"
-                    onFileChange={(file) =>
-                      updateSelectedFile({
-                        file,
-                        setFile: setFrontImageFile,
-                        currentPreviewUrl: frontPreviewUrl,
-                        setPreviewUrl: setFrontPreviewUrl,
-                      })
-                    }
-                  />
-                </FormField>
-
-                <FormField
-                  label="Back ID Image"
-                  description="Optional. Upload the reverse side if the document has extra data on the back."
-                >
-                  <FileUploadCard
-                    file={backImageFile}
-                    emptyLabel="Choose the back image"
-                    onFileChange={(file) =>
-                      updateSelectedFile({
-                        file,
-                        setFile: setBackImageFile,
-                        currentPreviewUrl: backPreviewUrl,
-                        setPreviewUrl: setBackPreviewUrl,
-                      })
-                    }
-                  />
-                </FormField>
-              </div>
+              {verificationKind === "poi" ? (
+                <PoiForm
+                  englishName={poiEnglishName}
+                  issuedCountry={poiIssuedCountry}
+                  documentType={poiDocumentType}
+                  frontImageFile={frontImageFile}
+                  backImageFile={backImageFile}
+                  onEnglishNameChange={setPoiEnglishName}
+                  onIssuedCountryChange={setPoiIssuedCountry}
+                  onDocumentTypeChange={setPoiDocumentType}
+                  onFrontFileChange={(file) =>
+                    updateSelectedFile({
+                      file,
+                      setFile: setFrontImageFile,
+                      currentPreviewUrl: frontPreviewUrl,
+                      setPreviewUrl: setFrontPreviewUrl,
+                    })
+                  }
+                  onBackFileChange={(file) =>
+                    updateSelectedFile({
+                      file,
+                      setFile: setBackImageFile,
+                      currentPreviewUrl: backPreviewUrl,
+                      setPreviewUrl: setBackPreviewUrl,
+                    })
+                  }
+                />
+              ) : (
+                <PorForm
+                  issuedCountry={porIssuedCountry}
+                  documentType={porDocumentType}
+                  documentFile={porDocumentFile}
+                  onIssuedCountryChange={setPorIssuedCountry}
+                  onDocumentTypeChange={setPorDocumentType}
+                  onDocumentFileChange={(file) =>
+                    updateSelectedFile({
+                      file,
+                      setFile: setPorDocumentFile,
+                      currentPreviewUrl: porPreviewUrl,
+                      setPreviewUrl: setPorPreviewUrl,
+                    })
+                  }
+                />
+              )}
 
               <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
                 <button
@@ -229,11 +331,11 @@ export default function Home() {
                   disabled={isSubmitting}
                   className="inline-flex min-h-12 w-full items-center justify-center rounded-full bg-stone-950 px-6 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:bg-stone-400 sm:w-auto"
                 >
-                  {isSubmitting ? "Validating..." : "Validate"}
+                  {isSubmitting ? "Validating..." : activeCopy.buttonLabel}
                 </button>
                 <p className="text-sm leading-6 text-stone-500">
-                  OpenAI API is called only from the server route. The browser never
-                  receives the API key.
+                  OpenAI API is called only from the server route. Postal-code lookup
+                  runs on the server as well.
                 </p>
               </div>
 
@@ -246,21 +348,33 @@ export default function Home() {
           </div>
 
           <aside className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 lg:gap-6">
-            <ImagePreviewCard
-              title="Front Preview"
-              description="The required front-side image appears here."
-              previewUrl={frontPreviewUrl}
-              alt="Selected front ID preview"
-            />
+            {verificationKind === "poi" ? (
+              <>
+                <ImagePreviewCard
+                  title="Front Preview"
+                  description="The required front-side identity image appears here."
+                  previewUrl={frontPreviewUrl}
+                  alt="Selected front ID preview"
+                />
 
-            <ImagePreviewCard
-              title="Back Preview"
-              description="The optional back-side image appears here."
-              previewUrl={backPreviewUrl}
-              alt="Selected back ID preview"
-            />
+                <ImagePreviewCard
+                  title="Back Preview"
+                  description="The optional reverse-side identity image appears here."
+                  previewUrl={backPreviewUrl}
+                  alt="Selected back ID preview"
+                />
+              </>
+            ) : (
+              <ImagePreviewCard
+                title="POR Preview"
+                description="The uploaded proof-of-residence document appears here."
+                previewUrl={porPreviewUrl}
+                alt="Selected POR document preview"
+                className="sm:col-span-2 lg:col-span-1"
+              />
+            )}
 
-            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)] sm:col-span-2 lg:col-span-1">
+            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:col-span-2 sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)] lg:col-span-1">
               <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
                 Security
               </p>
@@ -284,6 +398,190 @@ export default function Home() {
         </div>
       </section>
     </main>
+  );
+}
+
+function PoiForm({
+  englishName,
+  issuedCountry,
+  documentType,
+  frontImageFile,
+  backImageFile,
+  onEnglishNameChange,
+  onIssuedCountryChange,
+  onDocumentTypeChange,
+  onFrontFileChange,
+  onBackFileChange,
+}: {
+  englishName: string;
+  issuedCountry: string;
+  documentType: string;
+  frontImageFile: File | null;
+  backImageFile: File | null;
+  onEnglishNameChange: (value: string) => void;
+  onIssuedCountryChange: (value: string) => void;
+  onDocumentTypeChange: (value: string) => void;
+  onFrontFileChange: (file: File | null) => void;
+  onBackFileChange: (file: File | null) => void;
+}) {
+  return (
+    <div className="grid gap-6 md:grid-cols-2">
+      <FormField
+        label="Customer English Full Name"
+        description="Required. This is the user-entered English name used for POI name matching."
+      >
+        <input
+          value={englishName}
+          onChange={(event) => onEnglishNameChange(event.target.value)}
+          placeholder="Giljung Kim"
+          className={inputClassName}
+          autoComplete="off"
+        />
+      </FormField>
+
+      <FormField
+        label="Document type"
+        description="Required. Select the POI document type that matches the upload."
+      >
+        <select
+          value={documentType}
+          onChange={(event) => onDocumentTypeChange(event.target.value)}
+          className={inputClassName}
+        >
+          {POI_DOCUMENT_TYPE_OPTIONS.map((option) => (
+            <option key={option.label} value={option.value} disabled={!option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </FormField>
+
+      <FormField
+        label="Issued country"
+        description="Required. Search and select the identity document issuing country."
+      >
+        <CountryCombobox
+          value={issuedCountry}
+          onChange={onIssuedCountryChange}
+          placeholder="Type to search countries"
+          className={inputClassName}
+        />
+      </FormField>
+
+      <FormField
+        label="Front ID Image"
+        description="Required. Upload the front photo or scan of the identity document."
+      >
+        <FileUploadCard
+          file={frontImageFile}
+          emptyLabel="Choose the front image"
+          onFileChange={onFrontFileChange}
+        />
+      </FormField>
+
+      <FormField
+        label="Back ID Image"
+        description="Optional. Upload the reverse side if the document has additional fields on the back."
+      >
+        <FileUploadCard
+          file={backImageFile}
+          emptyLabel="Choose the back image"
+          onFileChange={onBackFileChange}
+        />
+      </FormField>
+    </div>
+  );
+}
+
+function PorForm({
+  issuedCountry,
+  documentType,
+  documentFile,
+  onIssuedCountryChange,
+  onDocumentTypeChange,
+  onDocumentFileChange,
+}: {
+  issuedCountry: string;
+  documentType: string;
+  documentFile: File | null;
+  onIssuedCountryChange: (value: string) => void;
+  onDocumentTypeChange: (value: string) => void;
+  onDocumentFileChange: (file: File | null) => void;
+}) {
+  return (
+    <div className="grid gap-6 md:grid-cols-2">
+      <FormField
+        label="Document type"
+        description="Required. Select the POR document type that proves the user's address."
+      >
+        <select
+          value={documentType}
+          onChange={(event) => onDocumentTypeChange(event.target.value)}
+          className={inputClassName}
+        >
+          {POR_DOCUMENT_TYPE_OPTIONS.map((option) => (
+            <option key={option.label} value={option.value} disabled={!option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </FormField>
+
+      <FormField
+        label="Issued country"
+        description="Required. Search and select the country that issued the POR document."
+      >
+        <CountryCombobox
+          value={issuedCountry}
+          onChange={onIssuedCountryChange}
+          placeholder="Type to search countries"
+          className={inputClassName}
+        />
+      </FormField>
+
+      <FormField
+        label="POR Document Upload"
+        description="Required. Upload a proof-of-residence document image."
+      >
+        <FileUploadCard
+          file={documentFile}
+          emptyLabel="Choose the POR document"
+          onFileChange={onDocumentFileChange}
+        />
+      </FormField>
+    </div>
+  );
+}
+
+function ModeCard({
+  active,
+  eyebrow,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  eyebrow: string;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-[1.2rem] border px-4 py-4 text-left transition sm:px-5 ${
+        active
+          ? "border-teal-300 bg-teal-50/90 shadow-[0_16px_36px_rgba(17,94,89,0.12)]"
+          : "border-stone-200 bg-stone-50/80 hover:border-stone-300 hover:bg-white"
+      }`}
+    >
+      <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-teal-700">
+        {eyebrow}
+      </p>
+      <p className="mt-2 text-base font-semibold text-stone-950">{title}</p>
+      <p className="mt-2 text-sm leading-6 text-stone-600">{description}</p>
+    </button>
   );
 }
 
@@ -327,8 +625,7 @@ function FileUploadCard({
         accept={ACCEPTED_IMAGE_TYPES}
         className="sr-only"
         onChange={(event) => {
-          const nextFile = event.target.files?.[0] ?? null;
-          onFileChange(nextFile);
+          onFileChange(event.target.files?.[0] ?? null);
         }}
       />
     </label>
@@ -340,14 +637,18 @@ function ImagePreviewCard({
   description,
   previewUrl,
   alt,
+  className = "",
 }: {
   title: string;
   description: string;
   previewUrl: string;
   alt: string;
+  className?: string;
 }) {
   return (
-    <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
+    <section
+      className={`rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)] ${className}`}
+    >
       <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
         {title}
       </p>
