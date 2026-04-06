@@ -48,7 +48,7 @@ interface VerifyIdInput {
 }
 
 const SYSTEM_PROMPT = `You are an identity document analyzer.
-You receive a user-entered English full name plus one ID image.
+You receive a user-entered English full name plus one ID image, plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
 Rules:
@@ -58,11 +58,13 @@ Rules:
 - All confidence values must be numbers between 0 and 1.
 - country_detected should use ISO 3166-1 alpha-2 when confident, otherwise "".
 - date_of_birth must be normalized to YYYY-MM-DD when confident, otherwise "".
+- date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
 - Keep the original local-script names separate from romanized names.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
 - If name order is ambiguous, explain it in romanization_notes.
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
+- Use the document type and issuing country as strong hints when they are consistent with the image.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
 export async function verifyIdDocument({
@@ -71,7 +73,7 @@ export async function verifyIdDocument({
   documentTypeHint,
   file,
 }: VerifyIdInput): Promise<VerificationResult> {
-  validateInputs({ englishName, file });
+  validateInputs({ englishName, countryHint, documentTypeHint, file });
 
   const buffer = Buffer.from(await file.arrayBuffer());
   const localImageQuality = inspectImageQuality(buffer, file.size);
@@ -151,7 +153,9 @@ export async function verifyIdDocument({
       nameMatch.confidence,
       cleanedExtraction.first_name_confidence,
       cleanedExtraction.last_name_confidence,
+      cleanedExtraction.document_number_confidence,
       cleanedExtraction.date_of_birth_confidence,
+      cleanedExtraction.date_of_expiry_confidence,
       cleanedExtraction.nationality_confidence,
       gender.gender
         ? gender.gender_confidence
@@ -172,7 +176,7 @@ export async function verifyIdDocument({
 
   return {
     user_input_english_name: englishName,
-    country_detected: cleanedExtraction.country_detected,
+    country_detected: cleanedExtraction.country_detected || countryHint.trim(),
     document_type_detected:
       cleanedExtraction.document_type_detected || documentTypeHint.trim(),
     document_quality_confidence: documentQualityConfidence,
@@ -196,8 +200,12 @@ export async function verifyIdDocument({
     gender_source: gender.gender_source,
     gender_evidence: gender.gender_evidence,
     gender_notes: gender.gender_notes,
+    document_number: cleanedExtraction.document_number,
+    document_number_confidence: cleanedExtraction.document_number_confidence,
     date_of_birth: cleanedExtraction.date_of_birth,
     date_of_birth_confidence: cleanedExtraction.date_of_birth_confidence,
+    date_of_expiry: cleanedExtraction.date_of_expiry,
+    date_of_expiry_confidence: cleanedExtraction.date_of_expiry_confidence,
     place_of_birth: cleanedExtraction.place_of_birth,
     place_of_birth_confidence: cleanedExtraction.place_of_birth_confidence,
     nationality: cleanedExtraction.nationality,
@@ -216,13 +224,31 @@ export async function verifyIdDocument({
 
 function validateInputs({
   englishName,
+  countryHint,
+  documentTypeHint,
   file,
-}: Pick<VerifyIdInput, "englishName" | "file">) {
+}: VerifyIdInput) {
   if (!englishName.trim()) {
     throw new VerificationError(
       400,
       "영문 이름을 먼저 입력해주세요.",
       "English name is required.",
+    );
+  }
+
+  if (!documentTypeHint.trim()) {
+    throw new VerificationError(
+      400,
+      "문서 타입을 선택해주세요.",
+      "Document type is required.",
+    );
+  }
+
+  if (!countryHint.trim()) {
+    throw new VerificationError(
+      400,
+      "발급 국가를 입력해주세요.",
+      "Issued country is required.",
     );
   }
 
@@ -265,7 +291,7 @@ async function extractWithOpenAI({
     try {
       const response = await client.responses.parse({
         model,
-        max_output_tokens: 1600,
+        max_output_tokens: 1800,
         input: [
           {
             role: "system",
@@ -319,10 +345,12 @@ function buildUserPrompt({
 }: Omit<VerifyIdInput, "file">) {
   return [
     `User entered English full name: ${englishName.trim()}`,
-    `Country hint: ${countryHint.trim() || "none"}`,
-    `Document type hint: ${documentTypeHint.trim() || "none"}`,
+    `Issued country: ${countryHint.trim()}`,
+    `Document type: ${documentTypeHint.trim()}`,
     "Analyze the document image and extract the required fields.",
     "Keep unknown strings as empty strings and unknown arrays as empty arrays.",
+    "Return the document number when visible. If unreadable, return an empty string.",
+    "Return the date of expiry when visible and normalize it to YYYY-MM-DD.",
     "Provide a primary romanized full name and any credible alternatives.",
     "Do not infer gender without visible OCR label/value evidence.",
   ].join("\n");
@@ -330,6 +358,7 @@ function buildUserPrompt({
 
 function sanitizeExtraction(extraction: OpenAiExtraction, englishName: string) {
   const normalizedDate = normalizeDateValue(extraction.date_of_birth);
+  const normalizedExpiry = normalizeDateValue(extraction.date_of_expiry);
 
   return {
     country_detected: cleanText(extraction.country_detected),
@@ -355,10 +384,16 @@ function sanitizeExtraction(extraction: OpenAiExtraction, englishName: string) {
     gender_source: extraction.gender_source,
     gender_evidence: cleanText(extraction.gender_evidence),
     gender_notes: cleanText(extraction.gender_notes),
+    document_number: cleanText(extraction.document_number),
+    document_number_confidence: clampConfidence(extraction.document_number_confidence),
     date_of_birth: normalizedDate,
     date_of_birth_confidence: normalizedDate
       ? clampConfidence(extraction.date_of_birth_confidence)
       : clampConfidence(Math.min(extraction.date_of_birth_confidence, 0.35)),
+    date_of_expiry: normalizedExpiry,
+    date_of_expiry_confidence: normalizedExpiry
+      ? clampConfidence(extraction.date_of_expiry_confidence)
+      : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
     place_of_birth: cleanText(extraction.place_of_birth),
     place_of_birth_confidence: clampConfidence(extraction.place_of_birth_confidence),
     nationality: cleanText(extraction.nationality),

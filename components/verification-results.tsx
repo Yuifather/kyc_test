@@ -58,9 +58,19 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           : "",
     },
     {
+      label: "Document number",
+      value: result.document_number,
+      confidence: result.document_number_confidence,
+    },
+    {
       label: "Date of birth",
       value: result.date_of_birth,
       confidence: result.date_of_birth_confidence,
+    },
+    {
+      label: "Date of expiry",
+      value: result.date_of_expiry,
+      confidence: result.date_of_expiry_confidence,
     },
     {
       label: "Place of birth",

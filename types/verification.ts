@@ -54,8 +54,12 @@ export interface VerificationResult {
   gender_source: GenderSource;
   gender_evidence: string;
   gender_notes: string;
+  document_number: string;
+  document_number_confidence: number;
   date_of_birth: string;
   date_of_birth_confidence: number;
+  date_of_expiry: string;
+  date_of_expiry_confidence: number;
   place_of_birth: string;
   place_of_birth_confidence: number;
   nationality: string;
