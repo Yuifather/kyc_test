@@ -28,26 +28,24 @@ export default function Home() {
   const [englishName, setEnglishName] = useState("");
   const [issuedCountry, setIssuedCountry] = useState("");
   const [documentType, setDocumentType] = useState("");
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [frontImageFile, setFrontImageFile] = useState<File | null>(null);
+  const [backImageFile, setBackImageFile] = useState<File | null>(null);
+  const [frontPreviewUrl, setFrontPreviewUrl] = useState("");
+  const [backPreviewUrl, setBackPreviewUrl] = useState("");
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    if (!imageFile) {
-      setPreviewUrl("");
-      return;
+  useEffect(() => () => {
+    if (frontPreviewUrl) {
+      URL.revokeObjectURL(frontPreviewUrl);
     }
 
-    const objectUrl = URL.createObjectURL(imageFile);
-    setPreviewUrl(objectUrl);
-
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
-  }, [imageFile]);
+    if (backPreviewUrl) {
+      URL.revokeObjectURL(backPreviewUrl);
+    }
+  }, [backPreviewUrl, frontPreviewUrl]);
 
   useEffect(() => {
     if (result) {
@@ -76,8 +74,8 @@ export default function Home() {
       return;
     }
 
-    if (!imageFile) {
-      setErrorMessage("Upload an ID image file.");
+    if (!frontImageFile) {
+      setErrorMessage("Upload the front image of the ID.");
       return;
     }
 
@@ -89,7 +87,11 @@ export default function Home() {
       formData.append("englishName", englishName.trim());
       formData.append("documentTypeHint", documentType);
       formData.append("countryHint", canonicalIssuedCountry);
-      formData.append("image", imageFile);
+      formData.append("frontImage", frontImageFile);
+
+      if (backImageFile) {
+        formData.append("backImage", backImageFile);
+      }
 
       const response = await fetch("/api/verify-id", {
         method: "POST",
@@ -132,8 +134,8 @@ export default function Home() {
               </h1>
               <p className="mt-4 max-w-xl text-sm leading-6 text-stone-700 sm:mt-5 sm:max-w-2xl sm:text-lg sm:leading-8">
                 Enter the English name, choose the document type, search the issuing
-                country, and upload the ID image to compare the extracted romanized
-                name against the user input.
+                country, and upload the front and optional back images of the ID to
+                compare the extracted romanized name against the user input.
               </p>
             </div>
 
@@ -185,26 +187,39 @@ export default function Home() {
                 </FormField>
 
                 <FormField
-                  label="ID Image Upload"
-                  description="Required. Upload one photo or scan of the ID document."
+                  label="Front ID Image"
+                  description="Required. Upload the front photo or scan of the ID document."
                 >
-                  <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-[1.2rem] border border-dashed border-stone-300 bg-stone-50 px-4 py-4 text-center transition hover:border-teal-500 hover:bg-teal-50/60 sm:min-h-32 sm:rounded-[1.4rem] sm:py-5">
-                    <span className="max-w-full break-all text-sm font-semibold text-stone-800">
-                      {imageFile ? imageFile.name : "Choose an image file"}
-                    </span>
-                    <span className="mt-2 text-xs leading-6 text-stone-500">
-                      JPG, PNG, WEBP, HEIC up to 8MB
-                    </span>
-                    <input
-                      type="file"
-                      accept={ACCEPTED_IMAGE_TYPES}
-                      className="sr-only"
-                      onChange={(event) => {
-                        const nextFile = event.target.files?.[0] ?? null;
-                        setImageFile(nextFile);
-                      }}
-                    />
-                  </label>
+                  <FileUploadCard
+                    file={frontImageFile}
+                    emptyLabel="Choose the front image"
+                    onFileChange={(file) =>
+                      updateSelectedFile({
+                        file,
+                        setFile: setFrontImageFile,
+                        currentPreviewUrl: frontPreviewUrl,
+                        setPreviewUrl: setFrontPreviewUrl,
+                      })
+                    }
+                  />
+                </FormField>
+
+                <FormField
+                  label="Back ID Image"
+                  description="Optional. Upload the reverse side if the document has extra data on the back."
+                >
+                  <FileUploadCard
+                    file={backImageFile}
+                    emptyLabel="Choose the back image"
+                    onFileChange={(file) =>
+                      updateSelectedFile({
+                        file,
+                        setFile: setBackImageFile,
+                        currentPreviewUrl: backPreviewUrl,
+                        setPreviewUrl: setBackPreviewUrl,
+                      })
+                    }
+                  />
                 </FormField>
               </div>
 
@@ -231,30 +246,21 @@ export default function Home() {
           </div>
 
           <aside className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 lg:gap-6">
-            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
-                Preview
-              </p>
-              <div className="mt-3 overflow-hidden rounded-[1.2rem] border border-stone-200 bg-stone-100 sm:mt-4 sm:rounded-[1.5rem]">
-                {previewUrl ? (
-                  <div className="relative h-52 w-full sm:h-72">
-                    <Image
-                      src={previewUrl}
-                      alt="Selected ID preview"
-                      fill
-                      unoptimized
-                      className="object-cover"
-                    />
-                  </div>
-                ) : (
-                  <div className="flex h-52 items-center justify-center px-5 text-center text-sm leading-6 text-stone-500 sm:h-72 sm:px-6 sm:leading-7">
-                    Upload an ID image to see the preview here.
-                  </div>
-                )}
-              </div>
-            </section>
+            <ImagePreviewCard
+              title="Front Preview"
+              description="The required front-side image appears here."
+              previewUrl={frontPreviewUrl}
+              alt="Selected front ID preview"
+            />
 
-            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
+            <ImagePreviewCard
+              title="Back Preview"
+              description="The optional back-side image appears here."
+              previewUrl={backPreviewUrl}
+              alt="Selected back ID preview"
+            />
+
+            <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)] sm:col-span-2 lg:col-span-1">
               <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
                 Security
               </p>
@@ -297,6 +303,93 @@ function FormField({
       <div className="mt-3">{children}</div>
     </label>
   );
+}
+
+function FileUploadCard({
+  file,
+  emptyLabel,
+  onFileChange,
+}: {
+  file: File | null;
+  emptyLabel: string;
+  onFileChange: (file: File | null) => void;
+}) {
+  return (
+    <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-[1.2rem] border border-dashed border-stone-300 bg-stone-50 px-4 py-4 text-center transition hover:border-teal-500 hover:bg-teal-50/60 sm:min-h-32 sm:rounded-[1.4rem] sm:py-5">
+      <span className="max-w-full break-all text-sm font-semibold text-stone-800">
+        {file ? file.name : emptyLabel}
+      </span>
+      <span className="mt-2 text-xs leading-6 text-stone-500">
+        JPG, PNG, WEBP, HEIC up to 8MB
+      </span>
+      <input
+        type="file"
+        accept={ACCEPTED_IMAGE_TYPES}
+        className="sr-only"
+        onChange={(event) => {
+          const nextFile = event.target.files?.[0] ?? null;
+          onFileChange(nextFile);
+        }}
+      />
+    </label>
+  );
+}
+
+function ImagePreviewCard({
+  title,
+  description,
+  previewUrl,
+  alt,
+}: {
+  title: string;
+  description: string;
+  previewUrl: string;
+  alt: string;
+}) {
+  return (
+    <section className="rounded-[1.5rem] border border-stone-200/80 bg-white/82 p-4 shadow-[0_18px_48px_rgba(34,31,23,0.07)] sm:p-5 sm:shadow-[0_24px_65px_rgba(34,31,23,0.07)]">
+      <p className="text-xs font-semibold uppercase tracking-[0.28em] text-stone-500">
+        {title}
+      </p>
+      <p className="mt-2 text-sm leading-6 text-stone-600">{description}</p>
+      <div className="mt-3 overflow-hidden rounded-[1.2rem] border border-stone-200 bg-stone-100 sm:mt-4 sm:rounded-[1.5rem]">
+        {previewUrl ? (
+          <div className="relative h-52 w-full sm:h-72">
+            <Image
+              src={previewUrl}
+              alt={alt}
+              fill
+              unoptimized
+              className="object-cover"
+            />
+          </div>
+        ) : (
+          <div className="flex h-52 items-center justify-center px-5 text-center text-sm leading-6 text-stone-500 sm:h-72 sm:px-6 sm:leading-7">
+            Upload an image to see the preview here.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function updateSelectedFile({
+  file,
+  setFile,
+  currentPreviewUrl,
+  setPreviewUrl,
+}: {
+  file: File | null;
+  setFile: (file: File | null) => void;
+  currentPreviewUrl: string;
+  setPreviewUrl: (previewUrl: string) => void;
+}) {
+  if (currentPreviewUrl) {
+    URL.revokeObjectURL(currentPreviewUrl);
+  }
+
+  setFile(file);
+  setPreviewUrl(file ? URL.createObjectURL(file) : "");
 }
 
 const inputClassName =

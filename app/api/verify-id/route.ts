@@ -16,7 +16,7 @@ export async function POST(request: Request) {
 
   if (!rateLimit.allowed) {
     return jsonError(
-      "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+      "Too many verification attempts. Please try again later.",
       429,
       rateLimit.retryAfterSeconds,
     );
@@ -27,13 +27,14 @@ export async function POST(request: Request) {
     const englishName = String(formData.get("englishName") ?? "");
     const countryHint = String(formData.get("countryHint") ?? "");
     const documentTypeHint = String(formData.get("documentTypeHint") ?? "");
-    const file = formData.get("image");
+    const frontFile = formData.get("frontImage");
+    const backFile = formData.get("backImage");
 
-    if (!(file instanceof File)) {
+    if (!(frontFile instanceof File)) {
       throw new VerificationError(
         400,
-        "신분증 이미지를 먼저 업로드해주세요.",
-        "No image file was provided.",
+        "Upload the front image of the ID.",
+        "No front image file was provided.",
       );
     }
 
@@ -41,7 +42,8 @@ export async function POST(request: Request) {
       englishName,
       countryHint,
       documentTypeHint,
-      file,
+      frontFile,
+      backFile: backFile instanceof File ? backFile : undefined,
     });
 
     return NextResponse.json(result, {
@@ -55,12 +57,12 @@ export async function POST(request: Request) {
     }
 
     if (error instanceof Error && error.message.includes("OPENAI_API_KEY")) {
-      return jsonError("서버에 OpenAI API 키가 아직 설정되지 않았습니다.", 500);
+      return jsonError("The server is missing OPENAI_API_KEY.", 500);
     }
 
     console.error("ID verification failed:", error);
     return jsonError(
-      "신분증을 분석하는 중 문제가 발생했습니다. 이미지를 다시 확인한 뒤 재시도해주세요.",
+      "An error occurred while analyzing the ID images. Check the uploaded files and try again.",
       500,
     );
   }

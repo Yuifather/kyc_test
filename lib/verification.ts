@@ -44,11 +44,12 @@ interface VerifyIdInput {
   englishName: string;
   countryHint: string;
   documentTypeHint: string;
-  file: File;
+  frontFile: File;
+  backFile?: File;
 }
 
 const SYSTEM_PROMPT = `You are an identity document analyzer.
-You receive a user-entered English full name plus one ID image, plus the user-selected document type and issuing country.
+You receive a user-entered English full name plus the front image of an ID and sometimes the back image, plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
 Rules:
@@ -67,25 +68,45 @@ Rules:
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
 - Use the document type and issuing country as strong hints when they are consistent with the image.
+- The first image is always the front side. When a second image is provided, treat it as the back side of the same document.
+- Use the back side for fields that may only appear there, but do not invent fields if neither side shows them.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
 export async function verifyIdDocument({
   englishName,
   countryHint,
   documentTypeHint,
-  file,
+  frontFile,
+  backFile,
 }: VerifyIdInput): Promise<VerificationResult> {
-  validateInputs({ englishName, countryHint, documentTypeHint, file });
+  validateInputs({
+    englishName,
+    countryHint,
+    documentTypeHint,
+    frontFile,
+    backFile,
+  });
 
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const localImageQuality = inspectImageQuality(buffer, file.size);
+  const frontBuffer = Buffer.from(await frontFile.arrayBuffer());
+  const backBuffer = backFile
+    ? Buffer.from(await backFile.arrayBuffer())
+    : undefined;
+
+  const localImageQuality = combineImageQualityChecks([
+    inspectImageQuality(frontBuffer, frontFile.size),
+    ...(backBuffer && backFile ? [inspectImageQuality(backBuffer, backFile.size)] : []),
+  ]);
+
   const extraction = await extractWithOpenAI({
     englishName,
     countryHint,
     documentTypeHint,
-    file,
-    buffer,
+    frontFile,
+    backFile,
+    frontBuffer,
+    backBuffer,
   });
+
   const cleanedExtraction = sanitizeExtraction(extraction, englishName);
   const gender = resolveGenderExtraction({
     countryDetected: cleanedExtraction.country_detected,
@@ -223,12 +244,13 @@ function validateInputs({
   englishName,
   countryHint,
   documentTypeHint,
-  file,
+  frontFile,
+  backFile,
 }: VerifyIdInput) {
   if (!englishName.trim()) {
     throw new VerificationError(
       400,
-      "영문 이름을 먼저 입력해주세요.",
+      "Enter the user's English full name.",
       "English name is required.",
     );
   }
@@ -236,7 +258,7 @@ function validateInputs({
   if (!documentTypeHint.trim()) {
     throw new VerificationError(
       400,
-      "문서 타입을 선택해주세요.",
+      "Select the document type.",
       "Document type is required.",
     );
   }
@@ -244,24 +266,32 @@ function validateInputs({
   if (!countryHint.trim()) {
     throw new VerificationError(
       400,
-      "발급 국가를 입력해주세요.",
+      "Select the issued country.",
       "Issued country is required.",
     );
   }
 
+  validateImageFile(frontFile, "front");
+
+  if (backFile) {
+    validateImageFile(backFile, "back");
+  }
+}
+
+function validateImageFile(file: File, side: "front" | "back") {
   if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
     throw new VerificationError(
       400,
-      "JPG, PNG, WEBP, HEIC 형식의 이미지 파일만 업로드할 수 있습니다.",
-      `Unsupported file type: ${file.type}`,
+      `${capitalize(side)} image must be JPG, PNG, WEBP, or HEIC.`,
+      `Unsupported ${side} file type: ${file.type}`,
     );
   }
 
   if (file.size > MAX_FILE_SIZE_BYTES) {
     throw new VerificationError(
       400,
-      "이미지 파일이 너무 큽니다. 8MB 이하 파일을 업로드해주세요.",
-      `File too large: ${file.size}`,
+      `${capitalize(side)} image is too large. Use a file up to 8MB.`,
+      `${capitalize(side)} file too large: ${file.size}`,
     );
   }
 }
@@ -270,17 +300,38 @@ async function extractWithOpenAI({
   englishName,
   countryHint,
   documentTypeHint,
-  file,
-  buffer,
-}: VerifyIdInput & { buffer: Buffer }) {
+  frontFile,
+  backFile,
+  frontBuffer,
+  backBuffer,
+}: VerifyIdInput & { frontBuffer: Buffer; backBuffer?: Buffer }) {
   const client = getOpenAIClient();
-  const imageDataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
   const modelCandidates = getModelCandidates();
-  const userMessage = buildUserPrompt({
-    englishName,
-    countryHint,
-    documentTypeHint,
-  });
+  const inputContent = [
+    {
+      type: "input_text" as const,
+      text: buildUserPrompt({
+        englishName,
+        countryHint,
+        documentTypeHint,
+        hasBackImage: Boolean(backFile && backBuffer),
+      }),
+    },
+    {
+      type: "input_image" as const,
+      image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
+      detail: "high" as const,
+    },
+    ...(backFile && backBuffer
+      ? [
+          {
+            type: "input_image" as const,
+            image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
+            detail: "high" as const,
+          },
+        ]
+      : []),
+  ];
 
   let lastError: unknown;
 
@@ -296,17 +347,7 @@ async function extractWithOpenAI({
           },
           {
             role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: userMessage,
-              },
-              {
-                type: "input_image",
-                image_url: imageDataUrl,
-                detail: "high",
-              },
-            ],
+            content: inputContent,
           },
         ],
         text: {
@@ -317,7 +358,7 @@ async function extractWithOpenAI({
       if (!response.output_parsed) {
         throw new VerificationError(
           502,
-          "OpenAI가 응답은 반환했지만 결과를 구조화해서 읽지 못했습니다. 잠시 후 다시 시도해주세요.",
+          "OpenAI returned a response but it could not be parsed into the expected result shape.",
           "OpenAI returned no parsed output.",
         );
       }
@@ -339,12 +380,17 @@ function buildUserPrompt({
   englishName,
   countryHint,
   documentTypeHint,
-}: Omit<VerifyIdInput, "file">) {
+  hasBackImage,
+}: Omit<VerifyIdInput, "frontFile" | "backFile"> & { hasBackImage: boolean }) {
   return [
     `User entered English full name: ${englishName.trim()}`,
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
-    "Analyze the document image and extract the required fields.",
+    "Analyze the ID images and extract the required fields.",
+    "The first uploaded image is the front side.",
+    hasBackImage
+      ? "A second uploaded image is provided for the back side."
+      : "No back-side image is provided.",
     "Keep unknown strings as empty strings and unknown arrays as empty arrays.",
     "Do not set manual_review_required to true only because optional fields are absent on the document.",
     "Return the document number when visible. If unreadable, return an empty string.",
@@ -533,6 +579,16 @@ function buildDerivedWarnings(
   return warnings;
 }
 
+function combineImageQualityChecks(
+  checks: Array<{ confidence: number; notes: string[]; warnings: string[] }>,
+) {
+  return {
+    confidence: averageConfidence(checks.map((check) => check.confidence)),
+    notes: uniqueStrings(checks.flatMap((check) => check.notes)),
+    warnings: uniqueStrings(checks.flatMap((check) => check.warnings)),
+  };
+}
+
 function uniqueStrings(values: string[]) {
   const seen = new Set<string>();
   const unique: string[] = [];
@@ -574,7 +630,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (!(error instanceof Error)) {
     return new VerificationError(
       502,
-      "신분증 이미지를 분석하는 중 알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+      "An unknown OpenAI error occurred while analyzing the ID images.",
       "Unknown OpenAI error.",
     );
   }
@@ -589,7 +645,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (message.includes("openai_api_key")) {
     return new VerificationError(
       500,
-      "서버에 OpenAI API 키가 설정되지 않았습니다. `.env.local` 또는 Vercel 환경 변수를 확인해주세요.",
+      "The server is missing OPENAI_API_KEY. Check .env.local or your deployment environment variables.",
       error.message,
     );
   }
@@ -605,7 +661,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       401,
-      `OpenAI API 키가 올바르지 않거나 만료되었습니다. 키 값을 다시 확인해주세요.${formatDetailSuffix(
+      `The OpenAI API key is invalid or expired. Check the configured key.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -622,7 +678,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       429,
-      `OpenAI 크레딧 또는 결제 한도가 부족합니다. OpenAI Billing/Usage를 확인해주세요.${formatDetailSuffix(
+      `OpenAI quota or billing is insufficient. Check OpenAI Billing and Usage.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -633,7 +689,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   if (status === 429) {
     return new VerificationError(
       429,
-      `OpenAI 요청 한도를 초과했습니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
+      `OpenAI rate limits were exceeded. Please try again later.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -650,7 +706,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       403,
-      `현재 OpenAI 계정에서 필요한 모델에 접근할 수 없습니다. 모델 권한 또는 프로젝트 설정을 확인해주세요. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
+      `The configured OpenAI account cannot access the required model. Attempted models: ${attemptedModelSummary}.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -665,7 +721,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       404,
-      `요청한 OpenAI 모델을 찾을 수 없습니다. \`OPENAI_MODEL\` 설정 또는 계정에서 사용 가능한 모델을 확인해주세요. 시도한 모델: ${attemptedModelSummary}.${formatDetailSuffix(
+      `The requested OpenAI model was not found. Check OPENAI_MODEL or model access. Attempted models: ${attemptedModelSummary}.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -683,7 +739,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       400,
-      `업로드한 이미지 형식 또는 이미지 데이터에 문제가 있어 분석하지 못했습니다. 다른 이미지로 다시 시도해주세요.${formatDetailSuffix(
+      `The uploaded image format or image data could not be processed. Try a different image.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -698,7 +754,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       400,
-      `OpenAI 정책 검사에 의해 요청이 차단되었습니다.${formatDetailSuffix(
+      `The OpenAI request was blocked by content policy.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -715,7 +771,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       500,
-      `서버의 OpenAI 요청 설정에 문제가 있습니다. 관리자 확인이 필요합니다.${formatDetailSuffix(
+      `The server's OpenAI request configuration is invalid and needs to be fixed.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -732,7 +788,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
   ) {
     return new VerificationError(
       502,
-      `OpenAI 서버 응답이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.${formatDetailSuffix(
+      `OpenAI is temporarily unavailable or unstable. Please try again later.${formatDetailSuffix(
         status,
         code,
       )}`,
@@ -742,7 +798,7 @@ function mapOpenAIError(error: unknown, attemptedModels: string[]) {
 
   return new VerificationError(
     status >= 400 && status < 600 ? status : 502,
-    `신분증 이미지를 분석하는 중 OpenAI 요청이 실패했습니다. 설정 또는 입력 이미지를 다시 확인해주세요.${formatDetailSuffix(
+    `OpenAI failed while analyzing the ID images. Check the request settings and uploaded files.${formatDetailSuffix(
       status,
       code,
     )}`,
@@ -762,4 +818,8 @@ function formatDetailSuffix(status: number, code: string) {
   }
 
   return details.length ? ` (${details.join(", ")})` : "";
+}
+
+function capitalize(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
