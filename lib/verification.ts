@@ -56,6 +56,8 @@ Rules:
 - Unknown strings must be "".
 - Unknown arrays must be [].
 - All confidence values must be numbers between 0 and 1.
+- Keep manual_review_required false when optional fields are simply absent on the document.
+- Only set manual_review_required to true when image quality or core name evidence is too weak for reliable verification.
 - country_detected should use ISO 3166-1 alpha-2 when confident, otherwise "".
 - date_of_birth must be normalized to YYYY-MM-DD when confident, otherwise "".
 - date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
@@ -166,13 +168,8 @@ export async function verifyIdDocument({
   );
 
   const manualReviewRequired =
-    cleanedExtraction.manual_review_required ||
     nameMatch.result === "manual_review" ||
-    documentQualityConfidence < 0.55 ||
-    !cleanedExtraction.romanization_primary_full_name ||
-    !cleanedExtraction.first_name ||
-    !cleanedExtraction.last_name ||
-    warnings.length > 0;
+    documentQualityConfidence < 0.55;
 
   return {
     user_input_english_name: englishName,
@@ -349,6 +346,7 @@ function buildUserPrompt({
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the document image and extract the required fields.",
     "Keep unknown strings as empty strings and unknown arrays as empty arrays.",
+    "Do not set manual_review_required to true only because optional fields are absent on the document.",
     "Return the document number when visible. If unreadable, return an empty string.",
     "Return the date of expiry when visible and normalize it to YYYY-MM-DD.",
     "Provide a primary romanized full name and any credible alternatives.",
