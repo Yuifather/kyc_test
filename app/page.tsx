@@ -3,7 +3,9 @@
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 
+import { CountryCombobox } from "@/components/country-combobox";
 import { VerificationResults } from "@/components/verification-results";
+import { findCountryOption } from "@/lib/country-options";
 import type { VerificationResult } from "@/types/verification";
 
 const ACCEPTED_IMAGE_TYPES = [
@@ -58,22 +60,24 @@ export default function Home() {
     setErrorMessage("");
 
     if (!englishName.trim()) {
-      setErrorMessage("영문 이름을 먼저 입력해주세요.");
+      setErrorMessage("Enter the user's English full name.");
       return;
     }
 
     if (!documentType) {
-      setErrorMessage("문서 타입을 선택해주세요.");
+      setErrorMessage("Select the document type.");
       return;
     }
 
-    if (!issuedCountry.trim()) {
-      setErrorMessage("발급 국가를 입력해주세요.");
+    const canonicalIssuedCountry = findCountryOption(issuedCountry);
+
+    if (!canonicalIssuedCountry) {
+      setErrorMessage("Select the issued country from the dropdown list.");
       return;
     }
 
     if (!imageFile) {
-      setErrorMessage("신분증 이미지를 먼저 업로드해주세요.");
+      setErrorMessage("Upload an ID image file.");
       return;
     }
 
@@ -84,7 +88,7 @@ export default function Home() {
       const formData = new FormData();
       formData.append("englishName", englishName.trim());
       formData.append("documentTypeHint", documentType);
-      formData.append("countryHint", issuedCountry.trim());
+      formData.append("countryHint", canonicalIssuedCountry);
       formData.append("image", imageFile);
 
       const response = await fetch("/api/verify-id", {
@@ -98,16 +102,14 @@ export default function Home() {
 
       if (!response.ok) {
         throw new Error(
-          payload && "error" in payload ? payload.error : "검증에 실패했습니다.",
+          payload && "error" in payload ? payload.error : "Verification failed.",
         );
       }
 
       setResult(payload as VerificationResult);
     } catch (error) {
       setErrorMessage(
-        error instanceof Error
-          ? error.message
-          : "신분증 검증 중 문제가 발생했습니다.",
+        error instanceof Error ? error.message : "A verification error occurred.",
       );
     } finally {
       setIsSubmitting(false);
@@ -129,9 +131,9 @@ export default function Home() {
                 ID name match verification with OCR, romanization, and review-ready confidence.
               </h1>
               <p className="mt-4 max-w-xl text-sm leading-6 text-stone-700 sm:mt-5 sm:max-w-2xl sm:text-lg sm:leading-8">
-                Enter the English name, choose the document type, provide the issuing country,
-                and upload the ID image to compare the extracted romanized name against the user
-                input.
+                Enter the English name, choose the document type, search the issuing
+                country, and upload the ID image to compare the extracted romanized
+                name against the user input.
               </p>
             </div>
 
@@ -172,14 +174,13 @@ export default function Home() {
 
                 <FormField
                   label="Issued country"
-                  description="Required. Enter the issuing country code or country name."
+                  description="Required. Search and select the issuing country from the supported list."
                 >
-                  <input
+                  <CountryCombobox
                     value={issuedCountry}
-                    onChange={(event) => setIssuedCountry(event.target.value)}
-                    placeholder="KR or South Korea"
+                    onChange={setIssuedCountry}
+                    placeholder="Type to search countries"
                     className={inputClassName}
-                    autoComplete="off"
                   />
                 </FormField>
 
@@ -216,7 +217,8 @@ export default function Home() {
                   {isSubmitting ? "Validating..." : "Validate"}
                 </button>
                 <p className="text-sm leading-6 text-stone-500">
-                  OpenAI API is called only from the server route. The browser never receives the API key.
+                  OpenAI API is called only from the server route. The browser never
+                  receives the API key.
                 </p>
               </div>
 
@@ -262,7 +264,8 @@ export default function Home() {
                   <code>.env.local</code>.
                 </p>
                 <p>
-                  Production deployment should move the same key into Vercel Environment Variables.
+                  Production deployment should move the same key into Vercel
+                  Environment Variables.
                 </p>
                 <p>GitHub stores code only. The API key must never be committed.</p>
               </div>
