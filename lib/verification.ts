@@ -77,6 +77,9 @@ Rules:
 - date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
 - Keep standardized values separate from the local OCR values.
 - local_full_name should preserve the original local-script full name when visible.
+- local_first_name, local_last_name, local_middle_name, and local_full_name must keep the original OCR script exactly when visible.
+- If the original local name is in kanji and a kana reading (furigana) is visible or clearly recoverable from the document, put it in the matching *_furigana field.
+- Never replace the original local OCR name with furigana. Keep the original in local_* and the reading in *_furigana.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
 - If name order is ambiguous, explain it in romanization_notes.
 - Write explanatory text fields such as document_quality_notes, gender_notes, romanization_notes, and warnings in Korean.
@@ -263,17 +266,21 @@ export async function verifyPoiDocument({
       ) || "로컬 품질 점검 기준에서 추가 이미지 품질 이슈는 감지되지 않았습니다.",
     first_name: cleaned.first_name,
     local_first_name: cleaned.local_first_name,
+    local_first_name_furigana: cleaned.local_first_name_furigana,
     first_name_confidence: cleaned.first_name_confidence,
     local_first_name_confidence: cleaned.local_first_name_confidence,
     last_name: cleaned.last_name,
     local_last_name: cleaned.local_last_name,
+    local_last_name_furigana: cleaned.local_last_name_furigana,
     last_name_confidence: cleaned.last_name_confidence,
     local_last_name_confidence: cleaned.local_last_name_confidence,
     middle_name: cleaned.middle_name,
     local_middle_name: cleaned.local_middle_name,
+    local_middle_name_furigana: cleaned.local_middle_name_furigana,
     middle_name_confidence: cleaned.middle_name_confidence,
     local_middle_name_confidence: cleaned.local_middle_name_confidence,
     local_full_name: cleaned.local_full_name,
+    local_full_name_furigana: cleaned.local_full_name_furigana,
     local_full_name_confidence: cleaned.local_full_name_confidence,
     gender: gender.gender,
     local_gender: cleaned.local_gender,
@@ -541,6 +548,7 @@ async function extractPoiWithOpenAI({
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
     "Return local OCR text separately whenever it exists.",
+    "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
     "Do not infer gender without visible OCR label/value evidence.",
   ].join("\n");
 
@@ -666,7 +674,7 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
   const normalizedDateOfBirth = normalizeDateValue(extraction.date_of_birth);
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
 
-  return {
+  const cleaned = {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
@@ -685,17 +693,21 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
     document_quality_notes: cleanText(extraction.document_quality_notes),
     first_name: cleanText(extraction.first_name),
     local_first_name: cleanText(extraction.local_first_name),
+    local_first_name_furigana: cleanText(extraction.local_first_name_furigana),
     first_name_confidence: clampConfidence(extraction.first_name_confidence),
     local_first_name_confidence: clampConfidence(extraction.local_first_name_confidence),
     last_name: cleanText(extraction.last_name),
     local_last_name: cleanText(extraction.local_last_name),
+    local_last_name_furigana: cleanText(extraction.local_last_name_furigana),
     last_name_confidence: clampConfidence(extraction.last_name_confidence),
     local_last_name_confidence: clampConfidence(extraction.local_last_name_confidence),
     middle_name: cleanText(extraction.middle_name),
     local_middle_name: cleanText(extraction.local_middle_name),
+    local_middle_name_furigana: cleanText(extraction.local_middle_name_furigana),
     middle_name_confidence: clampConfidence(extraction.middle_name_confidence),
     local_middle_name_confidence: clampConfidence(extraction.local_middle_name_confidence),
     local_full_name: cleanText(extraction.local_full_name),
+    local_full_name_furigana: cleanText(extraction.local_full_name_furigana),
     local_full_name_confidence: clampConfidence(extraction.local_full_name_confidence),
     gender: extraction.gender,
     local_gender: cleanText(extraction.local_gender),
@@ -729,6 +741,8 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
+
+  return preferOriginalLocalPoiNameScripts(cleaned);
 }
 
 function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
@@ -1137,6 +1151,84 @@ function parseJapaneseRecipientAddress({
     localAddress1: cleanText(nextLocalAddress1) || cleanText(localAddress1),
     localAddress2: nextLocalAddress2,
   };
+}
+
+function preferOriginalLocalPoiNameScripts<T extends {
+  local_first_name: string;
+  local_first_name_furigana: string;
+  local_last_name: string;
+  local_last_name_furigana: string;
+  local_middle_name: string;
+  local_middle_name_furigana: string;
+  local_full_name: string;
+  local_full_name_furigana: string;
+}>(value: T) {
+  const nextValue = { ...value };
+  const fullName = cleanText(nextValue.local_full_name);
+  const splitFullName = splitLocalFullName(fullName);
+  const fullNameHasHan = containsHanScript(fullName);
+
+  if (fullNameHasHan && isKanaOnly(nextValue.local_last_name) && !nextValue.local_last_name_furigana) {
+    nextValue.local_last_name_furigana = nextValue.local_last_name;
+    nextValue.local_last_name = splitFullName.lastName || "";
+  }
+
+  if (fullNameHasHan && isKanaOnly(nextValue.local_first_name) && !nextValue.local_first_name_furigana) {
+    nextValue.local_first_name_furigana = nextValue.local_first_name;
+    nextValue.local_first_name = splitFullName.firstName || "";
+  }
+
+  if (
+    fullNameHasHan &&
+    isKanaOnly(nextValue.local_middle_name) &&
+    !nextValue.local_middle_name_furigana
+  ) {
+    nextValue.local_middle_name_furigana = nextValue.local_middle_name;
+    nextValue.local_middle_name = "";
+  }
+
+  if (
+    !nextValue.local_full_name_furigana &&
+    (nextValue.local_last_name_furigana || nextValue.local_first_name_furigana)
+  ) {
+    nextValue.local_full_name_furigana = [
+      nextValue.local_last_name_furigana,
+      nextValue.local_first_name_furigana,
+      nextValue.local_middle_name_furigana,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return nextValue;
+}
+
+function splitLocalFullName(value: string) {
+  const tokens = cleanText(value)
+    .split(/[\s·・]+/u)
+    .map((token) => cleanText(token))
+    .filter(Boolean);
+
+  if (tokens.length < 2) {
+    return {
+      lastName: "",
+      firstName: "",
+    };
+  }
+
+  return {
+    lastName: tokens[0] ?? "",
+    firstName: tokens.slice(1).join(" "),
+  };
+}
+
+function isKanaOnly(value: string) {
+  const cleaned = cleanText(value);
+  return Boolean(cleaned) && /^[\p{Script=Katakana}\p{Script=Hiragana}ー\s]+$/u.test(cleaned);
+}
+
+function containsHanScript(value: string) {
+  return /[\p{Script=Han}]/u.test(cleanText(value));
 }
 
 function matchJapaneseCityBoundary(value: string) {

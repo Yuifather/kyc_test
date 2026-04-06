@@ -25,6 +25,7 @@ interface DetailRow {
   label: string;
   value: string;
   localValue?: string;
+  localReading?: string;
   confidence: number;
   note?: string;
 }
@@ -67,24 +68,28 @@ function PoiResults({ result }: { result: PoiVerificationResult }) {
       label: "First name",
       value: result.first_name,
       localValue: result.local_first_name,
+      localReading: result.local_first_name_furigana,
       confidence: result.first_name_confidence,
     },
     {
       label: "Last name",
       value: result.last_name,
       localValue: result.local_last_name,
+      localReading: result.local_last_name_furigana,
       confidence: result.last_name_confidence,
     },
     {
       label: "Middle name",
       value: result.middle_name,
       localValue: result.local_middle_name,
+      localReading: result.local_middle_name_furigana,
       confidence: result.middle_name_confidence,
     },
     {
       label: "Local full name",
       value: "",
       localValue: result.local_full_name,
+      localReading: result.local_full_name_furigana,
       confidence: result.local_full_name_confidence,
       note: "문서에서 보이는 경우 로컬 원문 전체 이름을 그대로 보존합니다.",
     },
@@ -450,6 +455,11 @@ function CommonResultPanels({
                     <span className="text-stone-400">로컬 OCR 값이 없습니다.</span>
                   )}
                 </p>
+                {row.localReading ? (
+                  <p className="mt-1 text-xs leading-6 text-stone-500">
+                    후리가나: {row.localReading}
+                  </p>
+                ) : null}
                 {row.note ? (
                   <p className="mt-1 text-xs leading-6 text-stone-500">{row.note}</p>
                 ) : null}
