@@ -324,8 +324,23 @@ export async function verifyPorDocument({
     documentFile,
     buffer,
   });
+  let cleaned = sanitizePorExtraction(extraction);
 
-  const cleaned = sanitizePorExtraction(extraction);
+  if (shouldRetryPorAddressExtraction(cleaned, { countryHint, documentTypeHint })) {
+    const retryExtraction = await extractPorWithOpenAI({
+      countryHint,
+      documentTypeHint,
+      documentFile,
+      buffer,
+      mode: "address_rescue",
+    });
+    const retryCleaned = sanitizePorExtraction(retryExtraction);
+
+    if (getPorAddressExtractionScore(retryCleaned) > getPorAddressExtractionScore(cleaned)) {
+      cleaned = retryCleaned;
+    }
+  }
+
   const documentQualityConfidence = mergeDocumentQualityConfidence(
     cleaned.document_quality_confidence,
     localImageQuality.confidence,
@@ -583,8 +598,9 @@ async function extractPorWithOpenAI({
   documentTypeHint,
   documentFile,
   buffer,
-}: VerifyPorInput & { buffer: Buffer }) {
-  const userPrompt = [
+  mode = "default",
+}: VerifyPorInput & { buffer: Buffer; mode?: "default" | "address_rescue" }) {
+  const userPromptLines = [
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POR document image and extract the requested fields.",
@@ -596,7 +612,20 @@ async function extractPorWithOpenAI({
     'Japanese split example 1: "郡上市八幡町美山2455番地1" -> city "GUJO-SHI", address_1 "HACHIMAN-CHO MIYAMA", address_2 "2455-1".',
     'Japanese split example 2: "上益城郡益城町安永529" -> city "KAMIMASHIKI-GUN", address_1 "MASHIKI-MACHI", address_2 "YASUNAGA 529".',
     'For the same examples, local_city should remain "郡上市" or "上益城郡", and local_address_1 should remain "八幡町美山" or "益城町".',
-  ].join("\n");
+  ];
+
+  if (mode === "address_rescue") {
+    userPromptLines.push(
+      "This is a retry focused on recovering the residence address.",
+      "The document may be rotated sideways. Mentally rotate it until the text is upright before reading.",
+      "For Japanese residence cards or residence certificates, inspect the line labeled 住所 and nearby vertical text carefully.",
+      "If the address is visible, return local_full_address and split it into state, city, address_1, address_2, and postal_code.",
+      "Do not leave the address blank just because the image is rotated. Only leave it blank when it is genuinely unreadable.",
+      "If document_type and issued_country are already clear, prioritize recovering the address fields on this retry.",
+    );
+  }
+
+  const userPrompt = userPromptLines.join("\n");
 
   const inputContent = [
     { type: "input_text" as const, text: userPrompt },
@@ -999,6 +1028,45 @@ function derivePoiReviewStatus({
   }
 
   return "사람이 확인 안해도 괜찮다";
+}
+
+function shouldRetryPorAddressExtraction(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  const normalizedCountry = normalizeLooseText(countryHint);
+  const normalizedDocType = normalizeLooseText(documentTypeHint);
+  const isJapaneseResidenceDocument =
+    ["japan", "jp", "日本"].includes(normalizedCountry) &&
+    (normalizedDocType.includes("residence") ||
+      normalizedDocType.includes("card") ||
+      normalizedDocType.includes("permit"));
+
+  return (
+    isJapaneseResidenceDocument &&
+    getPorAddressExtractionScore(extraction) <= 2 &&
+    Boolean(extraction.document_type || extraction.issued_country)
+  );
+}
+
+function getPorAddressExtractionScore(extraction: ReturnType<typeof sanitizePorExtraction>) {
+  const fields = [
+    extraction.country,
+    extraction.state,
+    extraction.city,
+    extraction.address_1,
+    extraction.address_2,
+    extraction.postal_code,
+    extraction.local_full_address,
+  ];
+
+  return fields.filter(Boolean).length;
 }
 
 function derivePorReviewStatus({
