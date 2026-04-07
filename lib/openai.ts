@@ -18,6 +18,8 @@ export function getModelCandidates() {
     new Set(
       [
         process.env.OPENAI_MODEL?.trim(),
+        "gpt-5.4",
+        "gpt-4.1",
         "gpt-5.4-mini",
         "gpt-4.1-mini",
       ].filter((value): value is string => Boolean(value)),

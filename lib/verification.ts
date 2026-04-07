@@ -1,4 +1,5 @@
 import { zodTextFormat } from "openai/helpers/zod";
+import sharp from "sharp";
 
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
 import { resolveGenderExtraction } from "@/lib/gender-extraction";
@@ -62,7 +63,7 @@ interface VerifyPorInput {
 }
 
 const POI_SYSTEM_PROMPT = `You are an identity document analyzer for POI (Proof of Identity).
-You receive a user-entered English full name plus the front image of an ID and sometimes the back image, plus the user-selected document type and issuing country.
+You receive the front image of an ID and sometimes the back image, plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
 Rules:
@@ -94,6 +95,13 @@ Rules:
 - Extract person-name fields from the front side only.
 - If the front side does not show a readable person name, leave first_name, last_name, middle_name, and local_full_name blank.
 - Use the back side only for supplementary non-name fields that may appear there.
+- For Japanese identity documents, read the personal name only from the field labeled \u6c0f\u540d on the front side.
+- For Japanese driver's licenses and ID cards, do not use text from the \u4f4f\u6240 field or any address block for name fields.
+- If the image is rotated or the name field is vertical, mentally rotate it and read the \u6c0f\u540d field before extracting names.
+- If a Japanese local-script name is visible as surname followed by given name, keep that exact local order in local_full_name and split local_last_name/local_first_name accordingly.
+- For Japanese documents, local_issued_country should be \u65e5\u672c when the issuing country is Japan. Do not put a prefecture into local_issued_country.
+- If a Japanese given name in kanji has multiple plausible readings and no furigana is visible, keep the local kanji in local_* fields, lower confidence, and include multiple plausible romanizations in romanization_alternatives.
+- Never output placeholder, example, or stereotyped names. If the actual name is unclear, leave the name fields blank instead of inventing a common Japanese name.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
 const POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
@@ -166,7 +174,28 @@ export async function verifyPoiDocument({
     backBuffer,
   });
 
-  const cleaned = sanitizePoiExtraction(extraction, englishName);
+  let cleaned = sanitizePoiExtraction(extraction);
+
+  if (shouldRunJapanesePoiNameRescue({
+    countryHint,
+    documentTypeHint,
+    issuedCountry: cleaned.issued_country,
+    localIssuedCountry: cleaned.local_issued_country,
+  })) {
+    const nameRescueExtraction = await extractPoiWithOpenAI({
+      englishName,
+      countryHint,
+      documentTypeHint,
+      frontFile,
+      frontBuffer,
+      mode: "name_rescue",
+    });
+    const nameRescueCleaned = sanitizePoiExtraction(nameRescueExtraction);
+
+    if (hasPoiNameEvidence(nameRescueCleaned)) {
+      cleaned = mergePoiNameExtraction(cleaned, nameRescueCleaned);
+    }
+  }
   const gender = resolveGenderExtraction({
     countryDetected: cleaned.issued_country,
     gender: cleaned.gender,
@@ -232,8 +261,12 @@ export async function verifyPoiDocument({
   );
   const manualReviewRequired =
     nameMatch.result === "manual_review" || documentQualityConfidence < 0.55;
-  const reviewStatus = derivePoiReviewStatusEnhanced({
+  const reviewStatus = derivePoiReviewStatusV2({
     manualReviewRequired,
+    documentType: cleaned.document_type || documentTypeHint.trim(),
+    documentTypeConfidence: cleaned.document_type_confidence,
+    documentNumber: cleaned.document_number,
+    documentNumberConfidence: cleaned.document_number_confidence,
     issuedCountry: cleaned.issued_country || countryHint.trim(),
     nameMatchResult: nameMatch.result,
     nameMatchConfidence: nameMatch.confidence,
@@ -559,21 +592,28 @@ function validateImageFile(file: File, side: "front" | "back" | "document") {
 }
 
 async function extractPoiWithOpenAI({
-  englishName,
+  englishName: _englishName,
   countryHint,
   documentTypeHint,
   frontFile,
   backFile,
   frontBuffer,
   backBuffer,
-}: VerifyPoiInput & { frontBuffer: Buffer; backBuffer?: Buffer }) {
-  const userPrompt = [
-    `User entered English full name: ${englishName.trim()}`,
+  mode = "default",
+}: VerifyPoiInput & {
+  frontBuffer: Buffer;
+  backBuffer?: Buffer;
+  mode?: "default" | "name_rescue";
+}) {
+  void _englishName;
+  const userPromptLines = [
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POI document images and extract the requested fields.",
     "The first uploaded image is the front side.",
-    backFile && backBuffer
+    mode === "name_rescue"
+      ? "This retry is focused only on the person's name from the front side."
+      : backFile && backBuffer
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
     "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
@@ -581,9 +621,26 @@ async function extractPoiWithOpenAI({
     "Return local OCR text separately whenever it exists.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
     "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
-    "Use the user-entered English name only as a comparison target. Do not copy it into extracted name fields unless the document itself supports the same spelling.",
+    "The server compares the extracted name with the user's input later. Do not use any external or assumed English spelling to fill extracted name fields.",
+    "For Japanese IDs, read names from the front-side \u6c0f\u540d field only, even when the image is vertical or rotated.",
+    "For Japanese IDs, never use \u4f4f\u6240 or address text for name fields.",
+    "If a Japanese kanji name has more than one plausible reading and no furigana is shown, keep the local kanji fields, lower the standardized-name confidence, and list plausible Latin spellings in romanization_alternatives.",
     "Do not infer gender without visible OCR label/value evidence.",
-  ].join("\n");
+  ];
+
+  if (mode === "name_rescue") {
+    userPromptLines.push(
+      "Ignore address, issuer, dates, class, organ-donation notes, and all non-name text unless needed only to orient the card.",
+      "On Japanese driver's licenses and ID cards, the name is in the front-side field labeled \u6c0f\u540d. Read that field before any nearby vertical text.",
+      "Never copy \u4f4f\u6240 or any place name into local_first_name, local_last_name, or local_full_name.",
+      "Additional rotated views of the same front side may be provided. Use whichever view makes the \u6c0f\u540d field most legible.",
+      "Never output placeholder or example names. If the actual name is unreadable, leave every name field blank.",
+    );
+  }
+
+  const userPrompt = userPromptLines.join("\n");
+  const rotatedFrontViews =
+    mode === "name_rescue" ? await buildPoiNameRescueImageInputs(frontBuffer) : [];
 
   const inputContent = [
     { type: "input_text" as const, text: userPrompt },
@@ -592,7 +649,8 @@ async function extractPoiWithOpenAI({
       image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
       detail: "high" as const,
     },
-    ...(backFile && backBuffer
+    ...rotatedFrontViews,
+    ...(mode !== "name_rescue" && backFile && backBuffer
       ? [
           {
             type: "input_image" as const,
@@ -717,7 +775,7 @@ async function executeOpenAiParse({
   throw mapOpenAIError(lastError, modelCandidates);
 }
 
-function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: string) {
+function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
   const normalizedDateOfBirth = normalizeDateValue(extraction.date_of_birth);
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
 
@@ -777,11 +835,7 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
     romanization_alternatives: uniqueNameList(
       extraction.romanization_alternatives
         .map((value) => cleanText(value))
-        .filter(
-          (value) =>
-            value &&
-            normalizeLooseText(value) !== normalizeLooseText(englishName),
-        ),
+        .filter(Boolean),
     ),
     romanization_notes: cleanText(extraction.romanization_notes),
     overall_confidence: clampConfidence(extraction.overall_confidence),
@@ -789,7 +843,11 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction, englishName: str
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
 
-  return preferOriginalLocalPoiNameScripts(cleaned);
+  const normalized = shouldApplyJapanesePoiHeuristics(cleaned)
+    ? normalizeJapanesePoiExtraction(cleaned)
+    : cleaned;
+
+  return preferOriginalLocalPoiNameScripts(normalized);
 }
 
 function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
@@ -1047,6 +1105,10 @@ function derivePoiReviewStatus({
 
 function derivePoiReviewStatusEnhanced({
   manualReviewRequired,
+  documentType,
+  documentTypeConfidence,
+  documentNumber,
+  documentNumberConfidence,
   issuedCountry,
   nameMatchResult,
   nameMatchConfidence,
@@ -1063,6 +1125,10 @@ function derivePoiReviewStatusEnhanced({
   localFullNameConfidence,
 }: {
   manualReviewRequired: boolean;
+  documentType: string;
+  documentTypeConfidence: number;
+  documentNumber: string;
+  documentNumberConfidence: number;
   issuedCountry: string;
   nameMatchResult: PoiVerificationResult["name_match_result"];
   nameMatchConfidence: number;
@@ -1088,7 +1154,9 @@ function derivePoiReviewStatusEnhanced({
     { value: localLastName, confidence: lastNameConfidence },
     { value: localFullName, confidence: localFullNameConfidence },
   ];
-  const hasJapaneseIssuedCountry = isJapaneseCountryValue(issuedCountry);
+  const hasJapaneseIssuedCountry =
+    isJapaneseCountryValue(issuedCountry) ||
+    normalizeLooseText(issuedCountry) === "\u65e5\u672c";
   const hasHanLocalName = [localFullName, localFirstName, localLastName].some((value) =>
     containsHanScript(value),
   );
@@ -1123,6 +1191,98 @@ function derivePoiReviewStatusEnhanced({
   }
 
   return "정상";
+}
+
+function derivePoiReviewStatusV2({
+  manualReviewRequired,
+  documentType,
+  documentTypeConfidence,
+  documentNumber,
+  documentNumberConfidence,
+  issuedCountry,
+  nameMatchResult,
+  nameMatchConfidence,
+  firstName,
+  firstNameConfidence,
+  lastName,
+  lastNameConfidence,
+  localFirstName,
+  localFirstNameFurigana,
+  localLastName,
+  localLastNameFurigana,
+  localFullName,
+  localFullNameFurigana,
+  localFullNameConfidence,
+}: {
+  manualReviewRequired: boolean;
+  documentType: string;
+  documentTypeConfidence: number;
+  documentNumber: string;
+  documentNumberConfidence: number;
+  issuedCountry: string;
+  nameMatchResult: PoiVerificationResult["name_match_result"];
+  nameMatchConfidence: number;
+  firstName: string;
+  firstNameConfidence: number;
+  lastName: string;
+  lastNameConfidence: number;
+  localFirstName: string;
+  localFirstNameFurigana: string;
+  localLastName: string;
+  localLastNameFurigana: string;
+  localFullName: string;
+  localFullNameFurigana: string;
+  localFullNameConfidence: number;
+}): ReviewStatus {
+  const hasFrontNameEvidence = Boolean(
+    localFullName || (firstName && lastName) || localFirstName || localLastName,
+  );
+  const hasCorePoiEvidence = Boolean(
+    (documentType && documentTypeConfidence >= 0.75) ||
+      (documentNumber && documentNumberConfidence >= 0.75),
+  );
+  const nameFields = [
+    { value: firstName, confidence: firstNameConfidence },
+    { value: lastName, confidence: lastNameConfidence },
+    { value: localFirstName, confidence: firstNameConfidence },
+    { value: localLastName, confidence: lastNameConfidence },
+    { value: localFullName, confidence: localFullNameConfidence },
+  ];
+  const hasJapaneseIssuedCountry = isJapaneseCountryValue(issuedCountry);
+  const hasHanLocalName = [localFullName, localFirstName, localLastName].some((value) =>
+    containsHanScript(value),
+  );
+  const hasVisibleFurigana = Boolean(
+    localFullNameFurigana || localFirstNameFurigana || localLastNameFurigana,
+  );
+
+  if (!hasFrontNameEvidence) {
+    return hasCorePoiEvidence ? "\uAC80\uD1A0" : "\uBD88\uAC00";
+  }
+
+  if (
+    nameMatchResult === "mismatch" ||
+    nameMatchResult === "likely_match" ||
+    nameMatchResult === "possible_match" ||
+    nameMatchResult === "manual_review" ||
+    nameMatchConfidence < 0.78 ||
+    hasLowConfidencePresentField(nameFields, 0.68) ||
+    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
+  ) {
+    return "\uAC80\uD1A0";
+  }
+
+  if (
+    hasJapaneseIssuedCountry &&
+    hasHanLocalName &&
+    ((!hasVisibleFurigana && nameMatchResult !== "exact_match") ||
+      nameMatchConfidence < 0.96 ||
+      hasLowConfidencePresentField(nameFields, 0.85))
+  ) {
+    return "\uAC80\uD1A0";
+  }
+
+  return "\uC815\uC0C1";
 }
 
 function shouldRetryPorAddressExtraction(
@@ -1248,6 +1408,224 @@ function hasLowConfidencePresentField(
 function isJapaneseCountryValue(value: string) {
   const normalized = normalizeLooseText(value);
   return ["japan", "jp", "日本"].includes(normalized);
+}
+
+function shouldApplyJapanesePoiHeuristics(value: {
+  issued_country: string;
+  local_issued_country: string;
+  document_type: string;
+  local_document_type: string;
+}) {
+  return [
+    value.issued_country,
+    value.local_issued_country,
+    value.document_type,
+    value.local_document_type,
+  ].some(
+    (candidate) =>
+      isJapaneseCountryValue(candidate) || normalizeLooseText(candidate) === "\u65e5\u672c",
+  );
+}
+
+function normalizeJapanesePoiExtraction<
+  T extends {
+    local_issued_country: string;
+    local_first_name: string;
+    local_first_name_furigana: string;
+    first_name_confidence: number;
+    local_last_name: string;
+    local_last_name_furigana: string;
+    last_name_confidence: number;
+    local_middle_name: string;
+    local_middle_name_furigana: string;
+    middle_name_confidence: number;
+    local_full_name: string;
+    local_full_name_furigana: string;
+    local_full_name_confidence: number;
+  },
+>(value: T) {
+  const nextValue = { ...value };
+
+  if (looksLikeJapanesePrefecture(nextValue.local_issued_country)) {
+    nextValue.local_issued_country = "\u65e5\u672c";
+  }
+
+  if (looksLikeJapaneseAddressField(nextValue.local_first_name)) {
+    nextValue.local_first_name = "";
+    nextValue.local_first_name_furigana = "";
+    nextValue.first_name_confidence = 0;
+  }
+
+  if (looksLikeJapaneseAddressField(nextValue.local_last_name)) {
+    nextValue.local_last_name = "";
+    nextValue.local_last_name_furigana = "";
+    nextValue.last_name_confidence = 0;
+  }
+
+  if (looksLikeJapaneseAddressField(nextValue.local_middle_name)) {
+    nextValue.local_middle_name = "";
+    nextValue.local_middle_name_furigana = "";
+    nextValue.middle_name_confidence = 0;
+  }
+
+  if (looksLikeJapaneseAddressField(nextValue.local_full_name)) {
+    nextValue.local_full_name = "";
+    nextValue.local_full_name_furigana = "";
+    nextValue.local_full_name_confidence = 0;
+  }
+
+  if (!nextValue.local_full_name && nextValue.local_last_name && nextValue.local_first_name) {
+    nextValue.local_full_name = `${nextValue.local_last_name} ${nextValue.local_first_name}`;
+    nextValue.local_full_name_confidence = averageConfidence([
+      nextValue.local_full_name_confidence,
+      nextValue.last_name_confidence,
+      nextValue.first_name_confidence,
+    ]);
+  }
+
+  if (nextValue.local_full_name && (!nextValue.local_last_name || !nextValue.local_first_name)) {
+    const splitFullName = splitLocalFullName(nextValue.local_full_name);
+
+    if (!nextValue.local_last_name && splitFullName.lastName) {
+      nextValue.local_last_name = splitFullName.lastName;
+    }
+
+    if (!nextValue.local_first_name && splitFullName.firstName) {
+      nextValue.local_first_name = splitFullName.firstName;
+    }
+  }
+
+  return nextValue;
+}
+
+function looksLikeJapanesePrefecture(value: string) {
+  return /[\u90fd\u9053\u5e9c\u770c]$/u.test(cleanText(value));
+}
+
+function looksLikeJapaneseAddressField(value: string) {
+  const cleaned = cleanText(value);
+
+  return (
+    /[0-9\uff10-\uff19]/u.test(cleaned) ||
+    /(?:\u4e01\u76ee|\u756a\u5730|\u756a|\u53f7)/u.test(cleaned) ||
+    /[\u90fd\u9053\u5e9c\u770c]$/u.test(cleaned)
+  );
+}
+
+function shouldRunJapanesePoiNameRescue({
+  countryHint,
+  documentTypeHint,
+  issuedCountry,
+  localIssuedCountry,
+}: {
+  countryHint: string;
+  documentTypeHint: string;
+  issuedCountry: string;
+  localIssuedCountry: string;
+}) {
+  const normalizedDocType = normalizeLooseText(documentTypeHint);
+  const isJapaneseDocument =
+    [countryHint, issuedCountry, localIssuedCountry].some(
+      (value) => isJapaneseCountryValue(value) || normalizeLooseText(value) === "\u65e5\u672c",
+    ) &&
+    (normalizedDocType.includes("driver") ||
+      normalizedDocType.includes("license") ||
+      normalizedDocType.includes("id") ||
+      normalizedDocType.includes("card"));
+
+  return isJapaneseDocument;
+}
+
+function hasPoiNameEvidence(value: {
+  first_name: string;
+  last_name: string;
+  local_first_name: string;
+  local_last_name: string;
+  local_full_name: string;
+  romanization_primary_full_name: string;
+}) {
+  return Boolean(
+    value.local_full_name ||
+      value.local_first_name ||
+      value.local_last_name ||
+      (value.first_name && value.last_name) ||
+      value.romanization_primary_full_name,
+  );
+}
+
+function mergePoiNameExtraction<
+  T extends {
+    first_name: string;
+    local_first_name: string;
+    local_first_name_furigana: string;
+    first_name_confidence: number;
+    local_first_name_confidence: number;
+    last_name: string;
+    local_last_name: string;
+    local_last_name_furigana: string;
+    last_name_confidence: number;
+    local_last_name_confidence: number;
+    middle_name: string;
+    local_middle_name: string;
+    local_middle_name_furigana: string;
+    middle_name_confidence: number;
+    local_middle_name_confidence: number;
+    local_full_name: string;
+    local_full_name_furigana: string;
+    local_full_name_confidence: number;
+    romanization_primary_full_name: string;
+    romanization_alternatives: string[];
+    romanization_notes: string;
+    overall_confidence: number;
+    warnings: string[];
+  },
+>(baseValue: T, rescueValue: T) {
+  return {
+    ...baseValue,
+    first_name: rescueValue.first_name,
+    local_first_name: rescueValue.local_first_name,
+    local_first_name_furigana: rescueValue.local_first_name_furigana,
+    first_name_confidence: rescueValue.first_name_confidence,
+    local_first_name_confidence: rescueValue.local_first_name_confidence,
+    last_name: rescueValue.last_name,
+    local_last_name: rescueValue.local_last_name,
+    local_last_name_furigana: rescueValue.local_last_name_furigana,
+    last_name_confidence: rescueValue.last_name_confidence,
+    local_last_name_confidence: rescueValue.local_last_name_confidence,
+    middle_name: rescueValue.middle_name,
+    local_middle_name: rescueValue.local_middle_name,
+    local_middle_name_furigana: rescueValue.local_middle_name_furigana,
+    middle_name_confidence: rescueValue.middle_name_confidence,
+    local_middle_name_confidence: rescueValue.local_middle_name_confidence,
+    local_full_name: rescueValue.local_full_name,
+    local_full_name_furigana: rescueValue.local_full_name_furigana,
+    local_full_name_confidence: rescueValue.local_full_name_confidence,
+    romanization_primary_full_name: rescueValue.romanization_primary_full_name,
+    romanization_alternatives: rescueValue.romanization_alternatives,
+    romanization_notes: rescueValue.romanization_notes,
+    overall_confidence: averageConfidence([
+      baseValue.overall_confidence,
+      rescueValue.overall_confidence,
+    ]),
+    warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
+  };
+}
+
+async function buildPoiNameRescueImageInputs(frontBuffer: Buffer) {
+  try {
+    const [clockwise, counterClockwise] = await Promise.all([
+      sharp(frontBuffer).rotate(90).png().toBuffer(),
+      sharp(frontBuffer).rotate(270).png().toBuffer(),
+    ]);
+
+    return [clockwise, counterClockwise].map((buffer) => ({
+      type: "input_image" as const,
+      image_url: `data:image/png;base64,${buffer.toString("base64")}`,
+      detail: "high" as const,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function parseJapaneseRecipientAddress({

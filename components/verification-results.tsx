@@ -283,22 +283,48 @@ function ResultRow({
 
 function derivePoiStandardizedNames(result: PoiVerificationResult) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
-  const firstName = hasLatinScript(result.first_name) ? result.first_name : "";
-  const lastName = hasLatinScript(result.last_name) ? result.last_name : "";
-  const middleName = hasLatinScript(result.middle_name) ? result.middle_name : "";
+  const firstName =
+    hasLatinScript(result.first_name) && result.first_name_confidence >= 0.72
+      ? result.first_name
+      : "";
+  const lastName =
+    hasLatinScript(result.last_name) && result.last_name_confidence >= 0.72
+      ? result.last_name
+      : "";
+  const middleName =
+    hasLatinScript(result.middle_name) && result.middle_name_confidence >= 0.72
+      ? result.middle_name
+      : "";
+  const componentNames = {
+    firstName,
+    lastName,
+    middleName,
+  };
+  const fallbackFullName = pickRomanizedPoiFullName(result);
+  const normalizedUserInput = normalizeLooseText(result.user_input_english_name);
 
   if (firstName || lastName || middleName) {
+    if (fallbackFullName && normalizedUserInput) {
+      const directFullName = shouldUppercaseNames
+        ? [lastName, firstName, middleName].filter(Boolean).join(" ")
+        : [firstName, middleName, lastName].filter(Boolean).join(" ");
+
+      if (
+        scoreRomanizedFullNameCandidate(fallbackFullName, normalizedUserInput) >
+        scoreRomanizedFullNameCandidate(directFullName, normalizedUserInput)
+      ) {
+        return applyJapanesePoiNameCasing(
+          splitRomanizedPoiFullName(fallbackFullName, shouldUppercaseNames),
+          shouldUppercaseNames,
+        );
+      }
+    }
+
     return applyJapanesePoiNameCasing(
-      {
-        firstName,
-        lastName,
-        middleName,
-      },
+      componentNames,
       shouldUppercaseNames,
     );
   }
-
-  const fallbackFullName = pickRomanizedPoiFullName(result);
 
   if (!fallbackFullName) {
     return {
@@ -309,7 +335,7 @@ function derivePoiStandardizedNames(result: PoiVerificationResult) {
   }
 
   return applyJapanesePoiNameCasing(
-    splitRomanizedPoiFullName(fallbackFullName, result.user_input_english_name),
+    splitRomanizedPoiFullName(fallbackFullName, shouldUppercaseNames),
     shouldUppercaseNames,
   );
 }
@@ -393,13 +419,30 @@ function pickRomanizedPoiFullName(result: PoiVerificationResult) {
   const candidates = [
     result.romanization_primary_full_name,
     ...result.romanization_alternatives,
-    result.user_input_english_name,
-  ];
+  ]
+    .map((value) => value.trim())
+    .filter((value) => hasLatinScript(value));
 
-  return candidates.find((value) => hasLatinScript(value))?.trim() ?? "";
+  if (!candidates.length) {
+    return "";
+  }
+
+  const normalizedUserInput = normalizeLooseText(result.user_input_english_name);
+
+  if (!normalizedUserInput) {
+    return candidates[0] ?? "";
+  }
+
+  return (
+    [...candidates].sort(
+      (left, right) =>
+        scoreRomanizedFullNameCandidate(right, normalizedUserInput) -
+        scoreRomanizedFullNameCandidate(left, normalizedUserInput),
+    )[0] ?? ""
+  );
 }
 
-function splitRomanizedPoiFullName(fullName: string, userInput: string) {
+function splitRomanizedPoiFullName(fullName: string, preferSurnameFirst: boolean) {
   const tokens = tokenizeRomanizedName(fullName);
 
   if (!tokens.length) {
@@ -410,52 +453,29 @@ function splitRomanizedPoiFullName(fullName: string, userInput: string) {
     return { firstName: tokens[0] ?? "", middleName: "", lastName: "" };
   }
 
-  const candidates = [
-    {
-      firstName: tokens[0] ?? "",
-      middleName: tokens.slice(1, -1).join(" "),
-      lastName: tokens.at(-1) ?? "",
-    },
-    {
+  if (preferSurnameFirst) {
+    return {
       firstName: tokens.slice(1).join(" "),
       middleName: "",
       lastName: tokens[0] ?? "",
-    },
-    {
-      firstName: tokens.at(-1) ?? "",
-      middleName: tokens.slice(1, -1).join(" "),
-      lastName: tokens[0] ?? "",
-    },
-  ];
-
-  const normalizedUserInput = normalizeLooseText(userInput);
-
-  if (!normalizedUserInput) {
-    return candidates[0] ?? { firstName: "", middleName: "", lastName: "" };
+    };
   }
 
-  return (
-    [...candidates]
-      .sort(
-        (left, right) =>
-          scoreRomanizedNameCandidate(right, normalizedUserInput) -
-          scoreRomanizedNameCandidate(left, normalizedUserInput),
-      )
-      .at(0) ?? { firstName: "", middleName: "", lastName: "" }
-  );
+  return {
+    firstName: tokens[0] ?? "",
+    middleName: tokens.slice(1, -1).join(" "),
+    lastName: tokens.at(-1) ?? "",
+  };
 }
 
-function scoreRomanizedNameCandidate(
-  candidate: { firstName: string; middleName: string; lastName: string },
+function scoreRomanizedFullNameCandidate(
+  fullName: string,
   normalizedUserInput: string,
 ) {
-  const normalizedFullName = normalizeLooseText(
-    [candidate.firstName, candidate.middleName, candidate.lastName]
-      .filter(Boolean)
-      .join(" "),
-  );
+  const normalizedFullName = normalizeLooseText(fullName);
+  const tokens = tokenizeRomanizedName(fullName);
   const normalizedWithoutMiddle = normalizeLooseText(
-    [candidate.firstName, candidate.lastName].filter(Boolean).join(" "),
+    tokens.length > 1 ? [tokens[0], tokens.at(-1)].filter(Boolean).join(" ") : fullName,
   );
 
   if (normalizedFullName && normalizedFullName === normalizedUserInput) {
