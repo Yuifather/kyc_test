@@ -72,6 +72,8 @@ Rules:
 - All confidence values must be numbers between 0 and 1.
 - Keep manual_review_required false when optional fields are simply absent on the document.
 - Only set manual_review_required to true when image quality or core name evidence is too weak for reliable verification.
+- first_name, last_name, middle_name, document_type, issued_country, nationality, and place_of_birth must be standardized values.
+- first_name, last_name, and middle_name must be written in Latin script when visible and romanizable. Never put kanji, kana, hangul, hanzi, or other local script into these standardized fields.
 - issued_country should be a country name consistent with the document and user hint when confident, otherwise "".
 - date_of_birth must be normalized to YYYY-MM-DD when confident, otherwise "".
 - date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
@@ -572,6 +574,7 @@ async function extractPoiWithOpenAI({
     "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
     "Do not use the back side to populate first_name, last_name, middle_name, or local_full_name.",
     "Return local OCR text separately whenever it exists.",
+    "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
     "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
     "Do not infer gender without visible OCR label/value evidence.",
   ].join("\n");
