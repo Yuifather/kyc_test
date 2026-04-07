@@ -87,7 +87,10 @@ Rules:
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
 - The first image is always the front side. When a second image is provided, treat it as the back side of the same document.
-- Use the back side for fields that may only appear there, but do not invent fields if neither side shows them.
+- The front side is required and must contain the person's name.
+- Extract person-name fields from the front side only.
+- If the front side does not show a readable person name, leave first_name, last_name, middle_name, and local_full_name blank.
+- Use the back side only for supplementary non-name fields that may appear there.
 - If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
 
 const POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
@@ -229,18 +232,15 @@ export async function verifyPoiDocument({
   const reviewStatus = derivePoiReviewStatus({
     manualReviewRequired,
     nameMatchResult: nameMatch.result,
+    nameMatchConfidence: nameMatch.confidence,
     firstName: cleaned.first_name,
     firstNameConfidence: cleaned.first_name_confidence,
     lastName: cleaned.last_name,
     lastNameConfidence: cleaned.last_name_confidence,
+    localFirstName: cleaned.local_first_name,
+    localLastName: cleaned.local_last_name,
     localFullName: cleaned.local_full_name,
     localFullNameConfidence: cleaned.local_full_name_confidence,
-    documentNumber: cleaned.document_number,
-    documentNumberConfidence: cleaned.document_number_confidence,
-    dateOfBirth: cleaned.date_of_birth,
-    dateOfBirthConfidence: cleaned.date_of_birth_confidence,
-    dateOfExpiry: cleaned.date_of_expiry,
-    dateOfExpiryConfidence: cleaned.date_of_expiry_confidence,
   });
 
   return {
@@ -404,16 +404,23 @@ export async function verifyPorDocument({
     manualReviewRequired,
     country: cleaned.country,
     countryConfidence: cleaned.country_confidence,
+    localCountry: cleaned.local_country,
     state: cleaned.state,
     stateConfidence: cleaned.state_confidence,
+    localState: cleaned.local_state,
     city: cleaned.city,
     cityConfidence: cleaned.city_confidence,
+    localCity: cleaned.local_city,
     address1: cleaned.address_1,
     address1Confidence: cleaned.address_1_confidence,
+    localAddress1: cleaned.local_address_1,
     address2: cleaned.address_2,
     address2Confidence: cleaned.address_2_confidence,
+    localAddress2: cleaned.local_address_2,
     postalCode: finalPostalCode,
     postalCodeConfidence: finalPostalCodeConfidence,
+    localFullAddress: cleaned.local_full_address,
+    postalCodeSource: cleaned.postal_code ? "ocr" : postalLookup.source,
   });
 
   return {
@@ -562,6 +569,8 @@ async function extractPoiWithOpenAI({
     backFile && backBuffer
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
+    "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
+    "Do not use the back side to populate first_name, last_name, middle_name, or local_full_name.",
     "Return local OCR text separately whenever it exists.",
     "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
     "Do not infer gender without visible OCR label/value evidence.",
@@ -975,59 +984,55 @@ function buildPorWarnings(
 function derivePoiReviewStatus({
   manualReviewRequired,
   nameMatchResult,
+  nameMatchConfidence,
   firstName,
   firstNameConfidence,
   lastName,
   lastNameConfidence,
+  localFirstName,
+  localLastName,
   localFullName,
   localFullNameConfidence,
-  documentNumber,
-  documentNumberConfidence,
-  dateOfBirth,
-  dateOfBirthConfidence,
-  dateOfExpiry,
-  dateOfExpiryConfidence,
 }: {
   manualReviewRequired: boolean;
   nameMatchResult: PoiVerificationResult["name_match_result"];
+  nameMatchConfidence: number;
   firstName: string;
   firstNameConfidence: number;
   lastName: string;
   lastNameConfidence: number;
+  localFirstName: string;
+  localLastName: string;
   localFullName: string;
   localFullNameConfidence: number;
-  documentNumber: string;
-  documentNumberConfidence: number;
-  dateOfBirth: string;
-  dateOfBirthConfidence: number;
-  dateOfExpiry: string;
-  dateOfExpiryConfidence: number;
 }): ReviewStatus {
-  const hasNameEvidence = Boolean(localFullName || (firstName && lastName));
-  const hasDocumentEvidence = Boolean(documentNumber || dateOfBirth || dateOfExpiry);
-  const coreFields = [
+  const hasFrontNameEvidence = Boolean(
+    localFullName || (firstName && lastName) || localFirstName || localLastName,
+  );
+  const nameFields = [
     { value: firstName, confidence: firstNameConfidence },
     { value: lastName, confidence: lastNameConfidence },
+    { value: localFirstName, confidence: firstNameConfidence },
+    { value: localLastName, confidence: lastNameConfidence },
     { value: localFullName, confidence: localFullNameConfidence },
-    { value: documentNumber, confidence: documentNumberConfidence },
-    { value: dateOfBirth, confidence: dateOfBirthConfidence },
-    { value: dateOfExpiry, confidence: dateOfExpiryConfidence },
   ];
 
-  if (nameMatchResult === "mismatch" || !hasNameEvidence || !hasDocumentEvidence) {
-    return "이건 무조건 잘못된 문서다";
+  if (!hasFrontNameEvidence) {
+    return "불가";
   }
 
   if (
+    nameMatchResult === "mismatch" ||
     nameMatchResult === "possible_match" ||
     nameMatchResult === "manual_review" ||
-    hasLowConfidencePresentField(coreFields, 0.65) ||
-    (manualReviewRequired && hasLowConfidencePresentField(coreFields, 0.8))
+    nameMatchConfidence < 0.78 ||
+    hasLowConfidencePresentField(nameFields, 0.68) ||
+    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
   ) {
-    return "사람이 확인해야하는 문서다";
+    return "검토";
   }
 
-  return "사람이 확인 안해도 괜찮다";
+  return "정상";
 }
 
 function shouldRetryPorAddressExtraction(
@@ -1073,31 +1078,48 @@ function derivePorReviewStatus({
   manualReviewRequired,
   country,
   countryConfidence,
+  localCountry,
   state,
   stateConfidence,
+  localState,
   city,
   cityConfidence,
+  localCity,
   address1,
   address1Confidence,
+  localAddress1,
   address2,
   address2Confidence,
+  localAddress2,
   postalCode,
   postalCodeConfidence,
+  localFullAddress,
+  postalCodeSource,
 }: {
   manualReviewRequired: boolean;
   country: string;
   countryConfidence: number;
+  localCountry: string;
   state: string;
   stateConfidence: number;
+  localState: string;
   city: string;
   cityConfidence: number;
+  localCity: string;
   address1: string;
   address1Confidence: number;
+  localAddress1: string;
   address2: string;
   address2Confidence: number;
+  localAddress2: string;
   postalCode: string;
   postalCodeConfidence: number;
+  localFullAddress: string;
+  postalCodeSource: PorVerificationResult["postal_code_source"];
 }): ReviewStatus {
+  const hasVisibleAddressEvidence = Boolean(
+    localFullAddress || localCountry || localState || localCity || localAddress1 || localAddress2,
+  );
   const hasCoreAddressEvidence = Boolean(country && state && city && address1);
   const coreFields = [
     { value: country, confidence: countryConfidence },
@@ -1108,18 +1130,20 @@ function derivePorReviewStatus({
     { value: postalCode, confidence: postalCodeConfidence },
   ];
 
-  if (!hasCoreAddressEvidence) {
-    return "이건 무조건 잘못된 문서다";
+  if (!hasVisibleAddressEvidence) {
+    return "불가";
   }
 
   if (
+    !hasCoreAddressEvidence ||
+    (postalCodeSource === "none" && !postalCode) ||
     hasLowConfidencePresentField(coreFields, 0.65) ||
     (manualReviewRequired && hasLowConfidencePresentField(coreFields, 0.8))
   ) {
-    return "사람이 확인해야하는 문서다";
+    return "검토";
   }
 
-  return "사람이 확인 안해도 괜찮다";
+  return "정상";
 }
 
 function hasLowConfidencePresentField(

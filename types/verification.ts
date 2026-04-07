@@ -20,9 +20,9 @@ export type GenderSource =
 export type PostalCodeSource = "ocr" | "lookup" | "none";
 
 export type ReviewStatus =
-  | "이건 무조건 잘못된 문서다"
-  | "사람이 확인해야하는 문서다"
-  | "사람이 확인 안해도 괜찮다";
+  | "불가"
+  | "검토"
+  | "정상";
 
 export interface NameMatchEvaluation {
   result: MatchResult;
