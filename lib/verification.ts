@@ -88,6 +88,7 @@ Rules:
 - Keep normalized data values such as document_type, issued_country, romanized names, and dates in their required output format.
 - Gender may only be returned when a printed gender/sex label and value are visible or strongly supported by OCR evidence.
 - Never infer gender from face, name, or document number patterns.
+- The user-entered English name is only for comparison. Never copy or adapt it into first_name, last_name, middle_name, or romanization fields unless the document evidence independently supports the same spelling.
 - The first image is always the front side. When a second image is provided, treat it as the back side of the same document.
 - The front side is required and must contain the person's name.
 - Extract person-name fields from the front side only.
@@ -231,8 +232,9 @@ export async function verifyPoiDocument({
   );
   const manualReviewRequired =
     nameMatch.result === "manual_review" || documentQualityConfidence < 0.55;
-  const reviewStatus = derivePoiReviewStatus({
+  const reviewStatus = derivePoiReviewStatusEnhanced({
     manualReviewRequired,
+    issuedCountry: cleaned.issued_country || countryHint.trim(),
     nameMatchResult: nameMatch.result,
     nameMatchConfidence: nameMatch.confidence,
     firstName: cleaned.first_name,
@@ -240,8 +242,11 @@ export async function verifyPoiDocument({
     lastName: cleaned.last_name,
     lastNameConfidence: cleaned.last_name_confidence,
     localFirstName: cleaned.local_first_name,
+    localFirstNameFurigana: cleaned.local_first_name_furigana,
     localLastName: cleaned.local_last_name,
+    localLastNameFurigana: cleaned.local_last_name_furigana,
     localFullName: cleaned.local_full_name,
+    localFullNameFurigana: cleaned.local_full_name_furigana,
     localFullNameConfidence: cleaned.local_full_name_confidence,
   });
 
@@ -576,6 +581,7 @@ async function extractPoiWithOpenAI({
     "Return local OCR text separately whenever it exists.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
     "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
+    "Use the user-entered English name only as a comparison target. Do not copy it into extracted name fields unless the document itself supports the same spelling.",
     "Do not infer gender without visible OCR label/value evidence.",
   ].join("\n");
 
@@ -984,6 +990,7 @@ function buildPorWarnings(
   return warnings;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function derivePoiReviewStatus({
   manualReviewRequired,
   nameMatchResult,
@@ -1031,6 +1038,86 @@ function derivePoiReviewStatus({
     nameMatchConfidence < 0.78 ||
     hasLowConfidencePresentField(nameFields, 0.68) ||
     (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
+  ) {
+    return "검토";
+  }
+
+  return "정상";
+}
+
+function derivePoiReviewStatusEnhanced({
+  manualReviewRequired,
+  issuedCountry,
+  nameMatchResult,
+  nameMatchConfidence,
+  firstName,
+  firstNameConfidence,
+  lastName,
+  lastNameConfidence,
+  localFirstName,
+  localFirstNameFurigana,
+  localLastName,
+  localLastNameFurigana,
+  localFullName,
+  localFullNameFurigana,
+  localFullNameConfidence,
+}: {
+  manualReviewRequired: boolean;
+  issuedCountry: string;
+  nameMatchResult: PoiVerificationResult["name_match_result"];
+  nameMatchConfidence: number;
+  firstName: string;
+  firstNameConfidence: number;
+  lastName: string;
+  lastNameConfidence: number;
+  localFirstName: string;
+  localFirstNameFurigana: string;
+  localLastName: string;
+  localLastNameFurigana: string;
+  localFullName: string;
+  localFullNameFurigana: string;
+  localFullNameConfidence: number;
+}): ReviewStatus {
+  const hasFrontNameEvidence = Boolean(
+    localFullName || (firstName && lastName) || localFirstName || localLastName,
+  );
+  const nameFields = [
+    { value: firstName, confidence: firstNameConfidence },
+    { value: lastName, confidence: lastNameConfidence },
+    { value: localFirstName, confidence: firstNameConfidence },
+    { value: localLastName, confidence: lastNameConfidence },
+    { value: localFullName, confidence: localFullNameConfidence },
+  ];
+  const hasJapaneseIssuedCountry = isJapaneseCountryValue(issuedCountry);
+  const hasHanLocalName = [localFullName, localFirstName, localLastName].some((value) =>
+    containsHanScript(value),
+  );
+  const hasVisibleFurigana = Boolean(
+    localFullNameFurigana || localFirstNameFurigana || localLastNameFurigana,
+  );
+
+  if (!hasFrontNameEvidence) {
+    return "불가";
+  }
+
+  if (
+    nameMatchResult === "mismatch" ||
+    nameMatchResult === "likely_match" ||
+    nameMatchResult === "possible_match" ||
+    nameMatchResult === "manual_review" ||
+    nameMatchConfidence < 0.78 ||
+    hasLowConfidencePresentField(nameFields, 0.68) ||
+    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
+  ) {
+    return "검토";
+  }
+
+  if (
+    hasJapaneseIssuedCountry &&
+    hasHanLocalName &&
+    ((!hasVisibleFurigana && nameMatchResult !== "exact_match") ||
+      nameMatchConfidence < 0.96 ||
+      hasLowConfidencePresentField(nameFields, 0.85))
   ) {
     return "검토";
   }
@@ -1156,6 +1243,11 @@ function hasLowConfidencePresentField(
   return fields.some(
     (field) => Boolean(field.value) && Number.isFinite(field.confidence) && field.confidence < threshold,
   );
+}
+
+function isJapaneseCountryValue(value: string) {
+  const normalized = normalizeLooseText(value);
+  return ["japan", "jp", "日本"].includes(normalized);
 }
 
 function parseJapaneseRecipientAddress({

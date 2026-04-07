@@ -13,10 +13,12 @@ const confidenceClasses: Record<ConfidenceTone, string> = {
   good: "border-emerald-200 bg-emerald-100 text-emerald-900",
 };
 
+const neutralBadgeClass = "border-stone-200 bg-stone-100 text-stone-500";
+
 const statusPanelClasses: Record<VerificationResult["review_status"], string> = {
-  "불가": "border-rose-300 bg-rose-100/90 text-rose-950",
-  "검토": "border-amber-300 bg-amber-100/90 text-amber-950",
-  "정상": "border-emerald-300 bg-emerald-100/90 text-emerald-950",
+  불가: "border-rose-300 bg-rose-100/90 text-rose-950",
+  검토: "border-amber-300 bg-amber-100/90 text-amber-950",
+  정상: "border-emerald-300 bg-emerald-100/90 text-emerald-950",
 };
 
 interface DetailRow {
@@ -25,6 +27,7 @@ interface DetailRow {
   localValue?: string;
   localReading?: string;
   confidence: number;
+  nameConsistency?: number | null;
 }
 
 export function VerificationResults({ result }: { result: VerificationResult }) {
@@ -45,10 +48,11 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
       </section>
 
       <section className="rounded-[1.5rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6">
-        <div className="grid gap-3 border-b border-stone-200/70 pb-3 text-xs font-semibold uppercase tracking-[0.18em] text-stone-500 sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto]">
+        <div className="grid gap-3 border-b border-stone-200/70 pb-3 text-xs font-semibold uppercase tracking-[0.18em] text-stone-500 sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]">
           <p>항목</p>
           <p>표준화 항목</p>
           <p>로컬 항목</p>
+          <p className="sm:text-right">이름 정합성</p>
           <p className="sm:text-right">Confidence</p>
         </div>
 
@@ -64,6 +68,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
 
 function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
   const standardizedNames = derivePoiStandardizedNames(result);
+  const nameConsistency = derivePoiNameConsistency(result, standardizedNames);
 
   return [
     {
@@ -96,6 +101,7 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       localValue: result.local_first_name,
       localReading: result.local_first_name_furigana,
       confidence: result.first_name_confidence,
+      nameConsistency: nameConsistency.firstName,
     },
     {
       label: "Last name",
@@ -103,6 +109,7 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       localValue: result.local_last_name,
       localReading: result.local_last_name_furigana,
       confidence: result.last_name_confidence,
+      nameConsistency: nameConsistency.lastName,
     },
     {
       label: "Middle name",
@@ -110,6 +117,7 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       localValue: result.local_middle_name,
       localReading: result.local_middle_name_furigana,
       confidence: result.middle_name_confidence,
+      nameConsistency: nameConsistency.middleName,
     },
     {
       label: "Gender",
@@ -205,7 +213,7 @@ function buildPorRows(result: PorVerificationResult): DetailRow[] {
 
 function ResultRow({ row }: { row: DetailRow }) {
   return (
-    <div className="grid gap-3 rounded-[1.15rem] border border-stone-200/70 bg-white/85 p-3.5 shadow-[0_14px_34px_rgba(36,33,25,0.06)] sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto] sm:items-start sm:rounded-[1.35rem] sm:p-4">
+    <div className="grid gap-3 rounded-[1.15rem] border border-stone-200/70 bg-white/85 p-3.5 shadow-[0_14px_34px_rgba(36,33,25,0.06)] sm:grid-cols-[0.9fr_1fr_1fr_auto_auto] sm:items-start sm:rounded-[1.35rem] sm:p-4">
       <div>
         <p className="text-sm font-semibold text-stone-900">{row.label}</p>
       </div>
@@ -223,6 +231,24 @@ function ResultRow({ row }: { row: DetailRow }) {
         {row.localReading ? (
           <p className="mt-1 text-xs leading-6 text-stone-500">후리가나: {row.localReading}</p>
         ) : null}
+      </div>
+
+      <div className="justify-self-start sm:justify-self-end">
+        {typeof row.nameConsistency === "number" ? (
+          <span
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
+              row.nameConsistency,
+            )]}`}
+          >
+            {formatConfidence(row.nameConsistency)}
+          </span>
+        ) : (
+          <span
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
+          >
+            -
+          </span>
+        )}
       </div>
 
       <div className="justify-self-start sm:justify-self-end">
@@ -269,6 +295,81 @@ function derivePoiStandardizedNames(result: PoiVerificationResult) {
     splitRomanizedPoiFullName(fallbackFullName, result.user_input_english_name),
     shouldUppercaseNames,
   );
+}
+
+function derivePoiNameConsistency(
+  result: PoiVerificationResult,
+  standardizedNames: { firstName: string; middleName: string; lastName: string },
+) {
+  const inputName = splitInputName(result.user_input_english_name);
+
+  return {
+    firstName: scoreNameConsistency(standardizedNames.firstName, inputName.firstName),
+    lastName: scoreNameConsistency(standardizedNames.lastName, inputName.lastName),
+    middleName: scoreNameConsistency(standardizedNames.middleName, inputName.middleName),
+  };
+}
+
+function scoreNameConsistency(standardizedValue: string, inputValue: string) {
+  const normalizedStandardized = normalizeRomanizedField(standardizedValue);
+  const normalizedInput = normalizeRomanizedField(inputValue);
+
+  if (!normalizedStandardized && !normalizedInput) {
+    return null;
+  }
+
+  if (!normalizedStandardized || !normalizedInput) {
+    return 0;
+  }
+
+  if (normalizedStandardized === normalizedInput) {
+    return 1;
+  }
+
+  if (
+    collapseJapaneseRomanizationVariant(normalizedStandardized) ===
+    collapseJapaneseRomanizationVariant(normalizedInput)
+  ) {
+    return 0.8;
+  }
+
+  return 0;
+}
+
+function normalizeRomanizedField(value: string) {
+  return normalizeLooseText(value).replace(/\s+/g, "");
+}
+
+function collapseJapaneseRomanizationVariant(value: string) {
+  return value
+    .replace(/shi/g, "si")
+    .replace(/chi/g, "ti")
+    .replace(/tsu/g, "tu")
+    .replace(/ji/g, "zi")
+    .replace(/jya/g, "zya")
+    .replace(/jyu/g, "zyu")
+    .replace(/jyo/g, "zyo")
+    .replace(/ou/g, "o")
+    .replace(/oo/g, "o")
+    .replace(/oh/g, "o");
+}
+
+function splitInputName(value: string) {
+  const tokens = tokenizeRomanizedName(value);
+
+  if (!tokens.length) {
+    return { firstName: "", middleName: "", lastName: "" };
+  }
+
+  if (tokens.length === 1) {
+    return { firstName: tokens[0] ?? "", middleName: "", lastName: "" };
+  }
+
+  return {
+    firstName: tokens[0] ?? "",
+    middleName: tokens.slice(1, -1).join(" "),
+    lastName: tokens.at(-1) ?? "",
+  };
 }
 
 function pickRomanizedPoiFullName(result: PoiVerificationResult) {
@@ -380,9 +481,7 @@ function isJapaneseIssuedCountry(result: PoiVerificationResult) {
     .map((value) => normalizeLooseText(value))
     .filter(Boolean);
 
-  return normalizedValues.some((value) =>
-    ["japan", "jp", "日本"].includes(value),
-  );
+  return normalizedValues.some((value) => ["japan", "jp", "日本"].includes(value));
 }
 
 function applyJapanesePoiNameCasing(
