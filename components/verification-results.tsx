@@ -239,16 +239,20 @@ function ResultRow({ row }: { row: DetailRow }) {
 }
 
 function derivePoiStandardizedNames(result: PoiVerificationResult) {
+  const shouldUppercaseNames = isJapaneseIssuedCountry(result);
   const firstName = hasLatinScript(result.first_name) ? result.first_name : "";
   const lastName = hasLatinScript(result.last_name) ? result.last_name : "";
   const middleName = hasLatinScript(result.middle_name) ? result.middle_name : "";
 
   if (firstName || lastName || middleName) {
-    return {
-      firstName,
-      lastName,
-      middleName,
-    };
+    return applyJapanesePoiNameCasing(
+      {
+        firstName,
+        lastName,
+        middleName,
+      },
+      shouldUppercaseNames,
+    );
   }
 
   const fallbackFullName = pickRomanizedPoiFullName(result);
@@ -261,7 +265,10 @@ function derivePoiStandardizedNames(result: PoiVerificationResult) {
     };
   }
 
-  return splitRomanizedPoiFullName(fallbackFullName, result.user_input_english_name);
+  return applyJapanesePoiNameCasing(
+    splitRomanizedPoiFullName(fallbackFullName, result.user_input_english_name),
+    shouldUppercaseNames,
+  );
 }
 
 function pickRomanizedPoiFullName(result: PoiVerificationResult) {
@@ -361,4 +368,34 @@ function tokenizeRomanizedName(value: string) {
 
 function hasLatinScript(value: string) {
   return /[\p{Script=Latin}]/u.test(value);
+}
+
+function isJapaneseIssuedCountry(result: PoiVerificationResult) {
+  const normalizedValues = [
+    result.issued_country,
+    result.local_issued_country,
+    result.document_type,
+    result.local_document_type,
+  ]
+    .map((value) => normalizeLooseText(value))
+    .filter(Boolean);
+
+  return normalizedValues.some((value) =>
+    ["japan", "jp", "日本"].includes(value),
+  );
+}
+
+function applyJapanesePoiNameCasing(
+  value: { firstName: string; middleName: string; lastName: string },
+  shouldUppercaseNames: boolean,
+) {
+  if (!shouldUppercaseNames) {
+    return value;
+  }
+
+  return {
+    firstName: value.firstName.toUpperCase(),
+    middleName: value.middleName.toUpperCase(),
+    lastName: value.lastName.toUpperCase(),
+  };
 }
