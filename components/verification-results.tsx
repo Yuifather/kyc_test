@@ -31,7 +31,11 @@ interface DetailRow {
 }
 
 export function VerificationResults({ result }: { result: VerificationResult }) {
-  const rows = result.kind === "poi" ? buildPoiRows(result) : buildPorRows(result);
+  const isPoi = result.kind === "poi";
+  const rows = isPoi ? buildPoiRows(result) : buildPorRows(result);
+  const gridClass = isPoi
+    ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
+    : "sm:grid-cols-[0.95fr_1.15fr_1.15fr_auto]";
 
   return (
     <div className="space-y-5">
@@ -48,17 +52,19 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
       </section>
 
       <section className="rounded-[1.5rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6">
-        <div className="grid gap-3 border-b border-stone-200/70 pb-3 text-xs font-semibold uppercase tracking-[0.18em] text-stone-500 sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]">
+        <div
+          className={`grid gap-3 border-b border-stone-200/70 pb-3 text-xs font-semibold uppercase tracking-[0.18em] text-stone-500 ${gridClass}`}
+        >
           <p>항목</p>
           <p>표준화 항목</p>
           <p>로컬 항목</p>
-          <p className="sm:text-right">이름 정합성</p>
+          {isPoi ? <p className="sm:text-right">이름 정합성</p> : null}
           <p className="sm:text-right">Confidence</p>
         </div>
 
         <div className="mt-3 space-y-3">
           {rows.map((row) => (
-            <ResultRow key={row.label} row={row} />
+            <ResultRow key={row.label} row={row} showNameConsistency={isPoi} />
           ))}
         </div>
       </section>
@@ -211,9 +217,21 @@ function buildPorRows(result: PorVerificationResult): DetailRow[] {
   ];
 }
 
-function ResultRow({ row }: { row: DetailRow }) {
+function ResultRow({
+  row,
+  showNameConsistency,
+}: {
+  row: DetailRow;
+  showNameConsistency: boolean;
+}) {
+  const gridClass = showNameConsistency
+    ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
+    : "sm:grid-cols-[0.95fr_1.15fr_1.15fr_auto]";
+
   return (
-    <div className="grid gap-3 rounded-[1.15rem] border border-stone-200/70 bg-white/85 p-3.5 shadow-[0_14px_34px_rgba(36,33,25,0.06)] sm:grid-cols-[0.9fr_1fr_1fr_auto_auto] sm:items-start sm:rounded-[1.35rem] sm:p-4">
+    <div
+      className={`grid gap-3 rounded-[1.15rem] border border-stone-200/70 bg-white/85 p-3.5 shadow-[0_14px_34px_rgba(36,33,25,0.06)] sm:items-start sm:rounded-[1.35rem] sm:p-4 ${gridClass}`}
+    >
       <div>
         <p className="text-sm font-semibold text-stone-900">{row.label}</p>
       </div>
@@ -230,23 +248,25 @@ function ResultRow({ row }: { row: DetailRow }) {
         </p>
       </div>
 
-      <div className="justify-self-start sm:justify-self-end">
-        {typeof row.nameConsistency === "number" ? (
-          <span
-            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
-              row.nameConsistency,
-            )]}`}
-          >
-            {formatConfidence(row.nameConsistency)}
-          </span>
-        ) : (
-          <span
-            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
-          >
-            -
-          </span>
-        )}
-      </div>
+      {showNameConsistency ? (
+        <div className="justify-self-start sm:justify-self-end">
+          {typeof row.nameConsistency === "number" ? (
+            <span
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
+                row.nameConsistency,
+              )]}`}
+            >
+              {formatConfidence(row.nameConsistency)}
+            </span>
+          ) : (
+            <span
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
+            >
+              -
+            </span>
+          )}
+        </div>
+      ) : null}
 
       <div className="justify-self-start sm:justify-self-end">
         <span
