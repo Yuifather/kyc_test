@@ -226,11 +226,8 @@ function ResultRow({ row }: { row: DetailRow }) {
 
       <div>
         <p className="text-sm leading-7 text-stone-700">
-          {row.localValue || <span className="text-stone-400">값 없음</span>}
+          {formatLocalDisplayValue(row) || <span className="text-stone-400">값 없음</span>}
         </p>
-        {row.localReading ? (
-          <p className="mt-1 text-xs leading-6 text-stone-500">후리가나: {row.localReading}</p>
-        ) : null}
       </div>
 
       <div className="justify-self-start sm:justify-self-end">
@@ -497,4 +494,15 @@ function applyJapanesePoiNameCasing(
     middleName: value.middleName.toUpperCase(),
     lastName: value.lastName.toUpperCase(),
   };
+}
+
+function formatLocalDisplayValue(row: DetailRow) {
+  const localValue = row.localValue?.trim() ?? "";
+  const localReading = row.localReading?.trim() ?? "";
+
+  if (localValue && localReading) {
+    return `${localValue} (${localReading})`;
+  }
+
+  return localValue || localReading;
 }
