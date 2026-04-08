@@ -778,14 +778,25 @@ async function executeOpenAiParse({
 function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
   const normalizedDateOfBirth = normalizeDateValue(extraction.date_of_birth);
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
+  const standardizedDocumentNumber = cleanDocumentNumberText(extraction.document_number);
+  const localDocumentNumber = cleanDocumentNumberText(extraction.local_document_number);
+  const finalDocumentNumber =
+    standardizedDocumentNumber ||
+    (looksLikeDocumentNumber(localDocumentNumber) ? localDocumentNumber : "");
+  const documentNumberConfidence = deriveDocumentNumberConfidence({
+    extractedConfidence: extraction.document_number_confidence,
+    documentQualityConfidence: extraction.document_quality_confidence,
+    standardizedValue: finalDocumentNumber,
+    localValue: localDocumentNumber,
+  });
 
   let cleaned = {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
-    document_number: cleanText(extraction.document_number),
-    local_document_number: cleanText(extraction.local_document_number),
-    document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    document_number: finalDocumentNumber,
+    local_document_number: localDocumentNumber,
+    document_number_confidence: documentNumberConfidence,
     issued_country: cleanText(extraction.issued_country),
     local_issued_country: cleanText(extraction.local_issued_country),
     issued_country_confidence: clampConfidence(extraction.issued_country_confidence),
@@ -862,6 +873,17 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
 function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
   const localFullAddress = cleanText(extraction.local_full_address);
+  const standardizedDocumentNumber = cleanDocumentNumberText(extraction.document_number);
+  const localDocumentNumber = cleanDocumentNumberText(extraction.local_document_number);
+  const finalDocumentNumber =
+    standardizedDocumentNumber ||
+    (looksLikeDocumentNumber(localDocumentNumber) ? localDocumentNumber : "");
+  const documentNumberConfidence = deriveDocumentNumberConfidence({
+    extractedConfidence: extraction.document_number_confidence,
+    documentQualityConfidence: extraction.document_quality_confidence,
+    standardizedValue: finalDocumentNumber,
+    localValue: localDocumentNumber,
+  });
   const visiblePostalCode =
     normalizePostalCode(extraction.postal_code) ||
     normalizePostalCode(extraction.local_postal_code) ||
@@ -894,9 +916,9 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
-    document_number: cleanText(extraction.document_number),
-    local_document_number: cleanText(extraction.local_document_number),
-    document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    document_number: finalDocumentNumber,
+    local_document_number: localDocumentNumber,
+    document_number_confidence: documentNumberConfidence,
     issued_country: cleanText(extraction.issued_country),
     local_issued_country: cleanText(extraction.local_issued_country),
     issued_country_confidence: clampConfidence(extraction.issued_country_confidence),
@@ -1969,6 +1991,70 @@ function normalizePostalCode(value: string) {
   }
 
   return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+}
+
+function cleanDocumentNumberText(value: string) {
+  const cleaned = cleanText(value).normalize("NFKC");
+
+  if (!cleaned) {
+    return "";
+  }
+
+  return cleaned
+    .replace(/^No\.?\s*/i, "")
+    .replace(/^第\s*/u, "")
+    .replace(/\s*号$/u, "")
+    .replace(/\s*([/-])\s*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function looksLikeDocumentNumber(value: string) {
+  const normalized = cleanDocumentNumberText(value);
+
+  if (!normalized) {
+    return false;
+  }
+
+  const compact = normalized.replace(/[^0-9A-Za-z]/g, "");
+
+  if (compact.length < 6) {
+    return false;
+  }
+
+  const digitCount = (compact.match(/\d/g) ?? []).length;
+  return digitCount >= Math.max(4, Math.floor(compact.length * 0.6));
+}
+
+function deriveDocumentNumberConfidence({
+  extractedConfidence,
+  documentQualityConfidence,
+  standardizedValue,
+  localValue,
+}: {
+  extractedConfidence: number;
+  documentQualityConfidence: number;
+  standardizedValue: string;
+  localValue: string;
+}) {
+  const baseConfidence = clampConfidence(extractedConfidence);
+  const normalizedValue = standardizedValue || localValue;
+
+  if (!normalizedValue || !looksLikeDocumentNumber(normalizedValue)) {
+    return baseConfidence;
+  }
+
+  if (localValue) {
+    return Math.max(
+      baseConfidence,
+      clampConfidence(averageConfidence([documentQualityConfidence, 0.9])),
+    );
+  }
+
+  return Math.max(
+    baseConfidence,
+    clampConfidence(averageConfidence([documentQualityConfidence, 0.82])),
+  );
 }
 
 function formatDate(year: string, month: string, day: string) {
