@@ -1,4 +1,4 @@
-import { formatConfidence, getConfidenceTone } from "@/lib/confidence";
+import { averageConfidence, formatConfidence, getConfidenceTone } from "@/lib/confidence";
 import { normalizeLooseText } from "@/lib/name-normalizer";
 import type {
   ConfidenceTone,
@@ -33,6 +33,7 @@ interface DetailRow {
 export function VerificationResults({ result }: { result: VerificationResult }) {
   const isPoi = result.kind === "poi";
   const rows = isPoi ? buildPoiRows(result) : buildPorRows(result);
+  const statusReasons = buildStatusReasons(result);
   const gridClass = isPoi
     ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
     : "sm:grid-cols-[0.95fr_1.15fr_1.15fr_auto]";
@@ -49,6 +50,15 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
             {result.review_status}
           </span>
         </div>
+        {result.review_status !== "정상" && statusReasons.length ? (
+          <div className="mt-4 space-y-2">
+            {statusReasons.map((reason) => (
+              <p key={reason} className="text-sm leading-6 text-current/85 sm:text-[15px]">
+                {reason}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-[1.5rem] border border-stone-200/70 bg-white/88 p-4 shadow-[0_18px_45px_rgba(34,31,23,0.07)] sm:rounded-[1.8rem] sm:p-6">
@@ -106,7 +116,12 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.firstName,
       localValue: result.local_first_name,
       localReading: result.local_first_name_furigana,
-      confidence: result.first_name_confidence,
+      confidence: combineDisplayedFieldConfidence(
+        result.first_name_confidence,
+        result.local_first_name_confidence,
+        standardizedNames.firstName,
+        result.local_first_name,
+      ),
       nameConsistency: nameConsistency.firstName,
     },
     {
@@ -114,7 +129,12 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.lastName,
       localValue: result.local_last_name,
       localReading: result.local_last_name_furigana,
-      confidence: result.last_name_confidence,
+      confidence: combineDisplayedFieldConfidence(
+        result.last_name_confidence,
+        result.local_last_name_confidence,
+        standardizedNames.lastName,
+        result.local_last_name,
+      ),
       nameConsistency: nameConsistency.lastName,
     },
     {
@@ -122,7 +142,12 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.middleName,
       localValue: result.local_middle_name,
       localReading: result.local_middle_name_furigana,
-      confidence: result.middle_name_confidence,
+      confidence: combineDisplayedFieldConfidence(
+        result.middle_name_confidence,
+        result.local_middle_name_confidence,
+        standardizedNames.middleName,
+        result.local_middle_name,
+      ),
       nameConsistency: nameConsistency.middleName,
     },
     {
@@ -351,6 +376,87 @@ function derivePoiNameConsistency(
     lastName: scoreNameConsistency(standardizedNames.lastName, inputName.lastName),
     middleName: scoreNameConsistency(standardizedNames.middleName, inputName.middleName),
   };
+}
+
+function buildStatusReasons(result: VerificationResult) {
+  return result.kind === "poi"
+    ? buildPoiStatusReasons(result)
+    : buildPorStatusReasons(result);
+}
+
+function buildPoiStatusReasons(result: PoiVerificationResult) {
+  const reasons: string[] = [];
+
+  if (
+    result.local_first_name &&
+    !result.local_first_name_furigana &&
+    result.local_first_name_confidence >= 0.85 &&
+    result.first_name_confidence > 0 &&
+    result.first_name_confidence < 0.8
+  ) {
+    reasons.push(
+      "로컬 이름 OCR은 비교적 선명하지만 후리가나가 없어 영문화 독음 신뢰도가 낮습니다.",
+    );
+  }
+
+  if (
+    result.local_last_name &&
+    !result.local_last_name_furigana &&
+    result.local_last_name_confidence >= 0.85 &&
+    result.last_name_confidence > 0 &&
+    result.last_name_confidence < 0.8
+  ) {
+    reasons.push(
+      "성 한자는 잘 읽혔지만 후리가나가 없어 로마자 독음이 하나로 고정되지 않았습니다.",
+    );
+  }
+
+  if (result.name_match_reason && result.review_status !== "정상") {
+    reasons.push(result.name_match_reason);
+  }
+
+  for (const warning of result.warnings) {
+    if (!reasons.includes(warning)) {
+      reasons.push(warning);
+    }
+  }
+
+  if (result.review_status === "불가" && !reasons.length) {
+    reasons.push("전면 이미지에서 신분 확인에 필요한 핵심 정보가 충분히 확인되지 않았습니다.");
+  }
+
+  return reasons.slice(0, 4);
+}
+
+function buildPorStatusReasons(result: PorVerificationResult) {
+  const reasons = [...result.warnings];
+
+  if (result.review_status === "불가" && !reasons.length) {
+    reasons.push("주소 증빙 문서로 보기 어려워 핵심 주소 정보를 확인하지 못했습니다.");
+  }
+
+  return reasons.slice(0, 4);
+}
+
+function combineDisplayedFieldConfidence(
+  standardizedConfidence: number,
+  localConfidence: number,
+  standardizedValue: string,
+  localValue: string,
+) {
+  const presentConfidences: number[] = [];
+
+  if (standardizedValue) {
+    presentConfidences.push(standardizedConfidence);
+  }
+
+  if (localValue) {
+    presentConfidences.push(localConfidence);
+  }
+
+  return presentConfidences.length
+    ? averageConfidence(presentConfidences)
+    : averageConfidence([standardizedConfidence, localConfidence]);
 }
 
 function scoreNameConsistency(standardizedValue: string, inputValue: string) {

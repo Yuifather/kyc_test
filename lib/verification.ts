@@ -779,7 +779,7 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
   const normalizedDateOfBirth = normalizeDateValue(extraction.date_of_birth);
   const normalizedDateOfExpiry = normalizeDateValue(extraction.date_of_expiry);
 
-  const cleaned = {
+  let cleaned = {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
@@ -842,6 +842,15 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
+
+  if (shouldClearInferredPoiNationality(cleaned)) {
+    cleaned = {
+      ...cleaned,
+      nationality: "",
+      local_nationality: "",
+      nationality_confidence: 0,
+    };
+  }
 
   const normalized = shouldApplyJapanesePoiHeuristics(cleaned)
     ? normalizeJapanesePoiExtraction(cleaned)
@@ -1103,12 +1112,14 @@ function derivePoiReviewStatus({
   return "정상";
 }
 
+/* eslint-disable @typescript-eslint/no-unused-vars */
+// Legacy helper kept temporarily for comparison with the current POI status logic.
 function derivePoiReviewStatusEnhanced({
   manualReviewRequired,
-  documentType,
-  documentTypeConfidence,
-  documentNumber,
-  documentNumberConfidence,
+  documentType: _documentType,
+  documentTypeConfidence: _documentTypeConfidence,
+  documentNumber: _documentNumber,
+  documentNumberConfidence: _documentNumberConfidence,
   issuedCountry,
   nameMatchResult,
   nameMatchConfidence,
@@ -1192,6 +1203,7 @@ function derivePoiReviewStatusEnhanced({
 
   return "정상";
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 function derivePoiReviewStatusV2({
   manualReviewRequired,
@@ -1609,6 +1621,37 @@ function mergePoiNameExtraction<
     ]),
     warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
   };
+}
+
+function shouldClearInferredPoiNationality(value: {
+  nationality: string;
+  local_nationality: string;
+  nationality_confidence: number;
+  issued_country: string;
+  local_document_type: string;
+  document_type: string;
+}) {
+  if (!value.nationality || value.local_nationality) {
+    return false;
+  }
+
+  const normalizedNationality = normalizeLooseText(value.nationality);
+  const normalizedIssuedCountry = normalizeLooseText(value.issued_country);
+
+  if (!normalizedNationality || normalizedNationality !== normalizedIssuedCountry) {
+    return false;
+  }
+
+  const normalizedDocumentType = normalizeLooseText(
+    `${value.document_type} ${value.local_document_type}`,
+  );
+
+  return (
+    value.nationality_confidence < 0.8 ||
+    normalizedDocumentType.includes("driver") ||
+    normalizedDocumentType.includes("license") ||
+    normalizedDocumentType.includes("\u904b\u8ee2")
+  );
 }
 
 async function buildPoiNameRescueImageInputs(frontBuffer: Buffer) {
