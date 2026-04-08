@@ -46,7 +46,6 @@ const AMBIGUOUS_NOTE_MARKERS = [
   "low quality",
   "hard to read",
   "multiple possible",
-  "order unclear",
 ];
 
 export function matchRomanizedName({
@@ -89,6 +88,16 @@ export function matchRomanizedName({
       bestCandidate = candidate;
       bestEvaluation = evaluation;
     }
+  }
+
+  if (
+    user.sortedTokens.join(" ") === bestCandidate.normalized.sortedTokens.join(" ")
+  ) {
+    bestEvaluation = {
+      result: "exact_match",
+      score: Math.max(bestEvaluation.score, 0.98),
+      reason: "사용자 입력값과 이름 토큰이 모두 일치합니다.",
+    };
   }
 
   const ambiguousRomanization = isRomanizationAmbiguous(romanizationNotes);

@@ -1,5 +1,5 @@
 ﻿import { formatConfidence, getConfidenceTone } from "@/lib/confidence";
-import { normalizeLooseText } from "@/lib/name-normalizer";
+import { normalizeLooseText, uniqueNameList } from "@/lib/name-normalizer";
 import type {
   ConfidenceTone,
   PoiVerificationResult,
@@ -247,7 +247,7 @@ function buildPorRows(result: PorVerificationResult): DetailRow[] {
       label: "Postal code",
       standardizedValue: result.postal_code,
       localValue: result.local_postal_code,
-      confidence: result.postal_code_confidence,
+      confidence: getDisplayedPostalCodeConfidence(result),
       lookupSource: getPostalCodeLookupSourceLabel(result),
     },
   ];
@@ -365,28 +365,46 @@ function derivePoiNameConsistency(
   standardizedNames: { firstName: string; middleName: string; lastName: string },
 ) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
-  const ocrNames = applyJapanesePoiNameCasing(
+  const romanizationCandidates = uniqueNameList([
+    result.romanization_primary_full_name,
+    ...result.romanization_alternatives,
+  ]);
+
+  const bestScores: { firstName: number | null; middleName: number | null; lastName: number | null } =
     {
-      firstName:
-        result.first_name ||
-        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
-          .firstName,
-      middleName:
-        result.middle_name ||
-        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
-          .middleName,
-      lastName:
-        result.last_name ||
-        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
-          .lastName,
-    },
-    shouldUppercaseNames,
-  );
+      firstName: null,
+      middleName: null,
+      lastName: null,
+    };
+
+  for (const candidate of romanizationCandidates) {
+    const candidateSplits = [
+      splitRomanizedPoiFullName(candidate, false),
+      splitRomanizedPoiFullName(candidate, true),
+    ];
+
+    for (const candidateSplit of candidateSplits) {
+      const normalizedCandidate = applyJapanesePoiNameCasing(candidateSplit, shouldUppercaseNames);
+
+      bestScores.firstName = mergeNameConsistencyScore(
+        bestScores.firstName,
+        scoreNameConsistency(standardizedNames.firstName, normalizedCandidate.firstName),
+      );
+      bestScores.middleName = mergeNameConsistencyScore(
+        bestScores.middleName,
+        scoreNameConsistency(standardizedNames.middleName, normalizedCandidate.middleName),
+      );
+      bestScores.lastName = mergeNameConsistencyScore(
+        bestScores.lastName,
+        scoreNameConsistency(standardizedNames.lastName, normalizedCandidate.lastName),
+      );
+    }
+  }
 
   return {
-    firstName: scoreNameConsistency(ocrNames.firstName, standardizedNames.firstName),
-    lastName: scoreNameConsistency(ocrNames.lastName, standardizedNames.lastName),
-    middleName: scoreNameConsistency(ocrNames.middleName, standardizedNames.middleName),
+    firstName: bestScores.firstName,
+    lastName: bestScores.lastName,
+    middleName: bestScores.middleName,
   };
 }
 
@@ -443,6 +461,14 @@ function getDisplayedNameOcrConfidence(
   return 0;
 }
 
+function getDisplayedPostalCodeConfidence(result: PorVerificationResult) {
+  if (result.postal_code_source === "ocr") {
+    return result.postal_code_confidence;
+  }
+
+  return 0;
+}
+
 function scoreNameConsistency(standardizedValue: string, inputValue: string) {
   const normalizedStandardized = normalizeRomanizedField(standardizedValue);
   const normalizedInput = normalizeRomanizedField(inputValue);
@@ -467,6 +493,21 @@ function scoreNameConsistency(standardizedValue: string, inputValue: string) {
   }
 
   return 0;
+}
+
+function mergeNameConsistencyScore(
+  current: number | null,
+  next: number | null,
+) {
+  if (current === null) {
+    return next;
+  }
+
+  if (next === null) {
+    return current;
+  }
+
+  return Math.max(current, next);
 }
 
 function normalizeRomanizedField(value: string) {

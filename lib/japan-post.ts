@@ -200,7 +200,7 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
   if (address1 && !address1IsMunicipality) {
     candidates.add(address1);
 
-    const strippedAddress1 = stripJapaneseTownPrefix(address1);
+    const strippedAddress1 = stripJapaneseTownPrefixV2(address1);
     if (strippedAddress1) {
       candidates.add(strippedAddress1);
     }
@@ -210,7 +210,7 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
   if (leadingTown) {
     candidates.add(leadingTown);
 
-    const strippedLeadingTown = stripJapaneseTownPrefix(leadingTown);
+    const strippedLeadingTown = stripJapaneseTownPrefixV2(leadingTown);
     if (strippedLeadingTown) {
       candidates.add(strippedLeadingTown);
     }
@@ -229,7 +229,12 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
   return Array.from(candidates);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function stripJapaneseTownPrefix(value: string) {
+  return value.replace(/^(大字|字|小字)/u, "");
+}
+
+function stripJapaneseTownPrefixV2(value: string) {
   return value.replace(/^(大字|字|小字)/u, "");
 }
 
