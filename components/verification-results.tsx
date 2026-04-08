@@ -1,4 +1,4 @@
-import { averageConfidence, formatConfidence, getConfidenceTone } from "@/lib/confidence";
+import { formatConfidence, getConfidenceTone } from "@/lib/confidence";
 import { normalizeLooseText } from "@/lib/name-normalizer";
 import type {
   ConfidenceTone,
@@ -13,13 +13,12 @@ const confidenceClasses: Record<ConfidenceTone, string> = {
   good: "border-emerald-200 bg-emerald-100 text-emerald-900",
 };
 
-const neutralBadgeClass = "border-stone-200 bg-stone-100 text-stone-500";
-
-const statusPanelClasses: Record<VerificationResult["review_status"], string> = {
-  불가: "border-rose-300 bg-rose-100/90 text-rose-950",
-  검토: "border-amber-300 bg-amber-100/90 text-amber-950",
-  정상: "border-emerald-300 bg-emerald-100/90 text-emerald-950",
+const sourceClasses = {
+  ocr: "border-emerald-200 bg-emerald-100 text-emerald-900",
+  lookup: "border-sky-200 bg-sky-100 text-sky-900",
 };
+
+const neutralBadgeClass = "border-stone-200 bg-stone-100 text-stone-500";
 
 interface DetailRow {
   label: string;
@@ -28,6 +27,7 @@ interface DetailRow {
   localReading?: string;
   confidence: number;
   nameConsistency?: number | null;
+  lookupSource?: "OCR" | "조회" | null;
 }
 
 export function VerificationResults({ result }: { result: VerificationResult }) {
@@ -36,12 +36,14 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
   const statusReasons = buildStatusReasons(result);
   const gridClass = isPoi
     ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
-    : "sm:grid-cols-[0.95fr_1.15fr_1.15fr_auto]";
+    : "sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto_auto]";
 
   return (
     <div className="space-y-5">
       <section
-        className={`rounded-[1.5rem] border p-5 shadow-[0_18px_40px_rgba(34,31,23,0.08)] sm:rounded-[1.8rem] sm:p-6 ${statusPanelClasses[result.review_status]}`}
+        className={`rounded-[1.5rem] border p-5 shadow-[0_18px_40px_rgba(34,31,23,0.08)] sm:rounded-[1.8rem] sm:p-6 ${getStatusPanelClass(
+          result.review_status,
+        )}`}
       >
         <p className="text-xs font-semibold uppercase tracking-[0.22em]">종합평가</p>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
@@ -68,18 +70,30 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           <p>항목</p>
           <p>표준화 항목</p>
           <p>로컬 항목</p>
-          {isPoi ? <p className="sm:text-right">이름 정합성</p> : null}
+          <p className="sm:text-right">{isPoi ? "이름 정합성" : "조회"}</p>
           <p className="sm:text-right">Confidence</p>
         </div>
 
         <div className="mt-3 space-y-3">
           {rows.map((row) => (
-            <ResultRow key={row.label} row={row} showNameConsistency={isPoi} />
+            <ResultRow key={row.label} row={row} variant={isPoi ? "poi" : "por"} />
           ))}
         </div>
       </section>
     </div>
   );
+}
+
+function getStatusPanelClass(reviewStatus: VerificationResult["review_status"]) {
+  if (reviewStatus === "불가") {
+    return "border-rose-300 bg-rose-100/90 text-rose-950";
+  }
+
+  if (reviewStatus === "검토") {
+    return "border-amber-300 bg-amber-100/90 text-amber-950";
+  }
+
+  return "border-emerald-300 bg-emerald-100/90 text-emerald-950";
 }
 
 function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
@@ -116,11 +130,11 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.firstName,
       localValue: result.local_first_name,
       localReading: result.local_first_name_furigana,
-      confidence: combineDisplayedFieldConfidence(
-        result.first_name_confidence,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_first_name,
         result.local_first_name_confidence,
         standardizedNames.firstName,
-        result.local_first_name,
+        result.first_name_confidence,
       ),
       nameConsistency: nameConsistency.firstName,
     },
@@ -129,11 +143,11 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.lastName,
       localValue: result.local_last_name,
       localReading: result.local_last_name_furigana,
-      confidence: combineDisplayedFieldConfidence(
-        result.last_name_confidence,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_last_name,
         result.local_last_name_confidence,
         standardizedNames.lastName,
-        result.local_last_name,
+        result.last_name_confidence,
       ),
       nameConsistency: nameConsistency.lastName,
     },
@@ -142,11 +156,11 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       standardizedValue: standardizedNames.middleName,
       localValue: result.local_middle_name,
       localReading: result.local_middle_name_furigana,
-      confidence: combineDisplayedFieldConfidence(
-        result.middle_name_confidence,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_middle_name,
         result.local_middle_name_confidence,
         standardizedNames.middleName,
-        result.local_middle_name,
+        result.middle_name_confidence,
       ),
       nameConsistency: nameConsistency.middleName,
     },
@@ -238,20 +252,38 @@ function buildPorRows(result: PorVerificationResult): DetailRow[] {
       standardizedValue: result.postal_code,
       localValue: result.local_postal_code,
       confidence: result.postal_code_confidence,
+      lookupSource: getPostalCodeLookupSourceLabel(result),
     },
   ];
 }
 
+function getPostalCodeLookupSourceLabel(result: PorVerificationResult) {
+  if (!result.postal_code) {
+    return null;
+  }
+
+  if (result.postal_code_source === "ocr") {
+    return "OCR";
+  }
+
+  if (result.postal_code_source === "lookup") {
+    return "조회";
+  }
+
+  return null;
+}
+
 function ResultRow({
   row,
-  showNameConsistency,
+  variant,
 }: {
   row: DetailRow;
-  showNameConsistency: boolean;
+  variant: "poi" | "por";
 }) {
-  const gridClass = showNameConsistency
+  const isPoi = variant === "poi";
+  const gridClass = isPoi
     ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
-    : "sm:grid-cols-[0.95fr_1.15fr_1.15fr_auto]";
+    : "sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto_auto]";
 
   return (
     <div
@@ -273,9 +305,9 @@ function ResultRow({
         </p>
       </div>
 
-      {showNameConsistency ? (
-        <div className="justify-self-start sm:justify-self-end">
-          {typeof row.nameConsistency === "number" ? (
+      <div className="justify-self-start sm:justify-self-end">
+        {isPoi ? (
+          typeof row.nameConsistency === "number" ? (
             <span
               className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
                 row.nameConsistency,
@@ -289,9 +321,27 @@ function ResultRow({
             >
               -
             </span>
-          )}
-        </div>
-      ) : null}
+          )
+        ) : row.lookupSource === "OCR" ? (
+          <span
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.ocr}`}
+          >
+            OCR
+          </span>
+        ) : row.lookupSource === "조회" ? (
+          <span
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.lookup}`}
+          >
+            조회
+          </span>
+        ) : (
+          <span
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
+          >
+            -
+          </span>
+        )}
+      </div>
 
       <div className="justify-self-start sm:justify-self-end">
         <span
@@ -345,10 +395,7 @@ function derivePoiStandardizedNames(result: PoiVerificationResult) {
       }
     }
 
-    return applyJapanesePoiNameCasing(
-      componentNames,
-      shouldUppercaseNames,
-    );
+    return applyJapanesePoiNameCasing(componentNames, shouldUppercaseNames);
   }
 
   if (!fallbackFullName) {
@@ -395,7 +442,7 @@ function buildPoiStatusReasons(result: PoiVerificationResult) {
     result.first_name_confidence < 0.8
   ) {
     reasons.push(
-      "로컬 이름 OCR은 비교적 선명하지만 후리가나가 없어 영문화 독음 신뢰도가 낮습니다.",
+      "로컬 이름 OCR은 비교적 선명하지만 후리가나가 없어 영문 독음 신뢰도가 낮습니다.",
     );
   }
 
@@ -407,7 +454,7 @@ function buildPoiStatusReasons(result: PoiVerificationResult) {
     result.last_name_confidence < 0.8
   ) {
     reasons.push(
-      "성 한자는 잘 읽혔지만 후리가나가 없어 로마자 독음이 하나로 고정되지 않았습니다.",
+      "성 한자는 확인되지만 후리가나가 없어 로마자 독음을 하나로 확정하지 못했습니다.",
     );
   }
 
@@ -422,7 +469,7 @@ function buildPoiStatusReasons(result: PoiVerificationResult) {
   }
 
   if (result.review_status === "불가" && !reasons.length) {
-    reasons.push("전면 이미지에서 신분 확인에 필요한 핵심 정보가 충분히 확인되지 않았습니다.");
+    reasons.push("앞면 이미지에서 신분 확인에 필요한 핵심 정보가 충분히 확인되지 않았습니다.");
   }
 
   return reasons.slice(0, 4);
@@ -438,25 +485,21 @@ function buildPorStatusReasons(result: PorVerificationResult) {
   return reasons.slice(0, 4);
 }
 
-function combineDisplayedFieldConfidence(
-  standardizedConfidence: number,
+function getDisplayedNameOcrConfidence(
+  localValue: string,
   localConfidence: number,
   standardizedValue: string,
-  localValue: string,
+  standardizedConfidence: number,
 ) {
-  const presentConfidences: number[] = [];
+  if (localValue) {
+    return localConfidence;
+  }
 
   if (standardizedValue) {
-    presentConfidences.push(standardizedConfidence);
+    return standardizedConfidence;
   }
 
-  if (localValue) {
-    presentConfidences.push(localConfidence);
-  }
-
-  return presentConfidences.length
-    ? averageConfidence(presentConfidences)
-    : averageConfidence([standardizedConfidence, localConfidence]);
+  return 0;
 }
 
 function scoreNameConsistency(standardizedValue: string, inputValue: string) {
@@ -522,10 +565,7 @@ function splitInputName(value: string) {
 }
 
 function pickRomanizedPoiFullName(result: PoiVerificationResult) {
-  const candidates = [
-    result.romanization_primary_full_name,
-    ...result.romanization_alternatives,
-  ]
+  const candidates = [result.romanization_primary_full_name, ...result.romanization_alternatives]
     .map((value) => value.trim())
     .filter((value) => hasLatinScript(value));
 
@@ -574,10 +614,7 @@ function splitRomanizedPoiFullName(fullName: string, preferSurnameFirst: boolean
   };
 }
 
-function scoreRomanizedFullNameCandidate(
-  fullName: string,
-  normalizedUserInput: string,
-) {
+function scoreRomanizedFullNameCandidate(fullName: string, normalizedUserInput: string) {
   const normalizedFullName = normalizeLooseText(fullName);
   const tokens = tokenizeRomanizedName(fullName);
   const normalizedWithoutMiddle = normalizeLooseText(
@@ -624,7 +661,7 @@ function isJapaneseIssuedCountry(result: PoiVerificationResult) {
     .map((value) => normalizeLooseText(value))
     .filter(Boolean);
 
-  return normalizedValues.some((value) => ["japan", "jp", "日本"].includes(value));
+  return normalizedValues.some((value) => ["japan", "jp", "일본", "日本"].includes(value));
 }
 
 function applyJapanesePoiNameCasing(
