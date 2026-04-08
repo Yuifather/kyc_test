@@ -1,4 +1,4 @@
-import { formatConfidence, getConfidenceTone } from "@/lib/confidence";
+﻿import { formatConfidence, getConfidenceTone } from "@/lib/confidence";
 import { normalizeLooseText } from "@/lib/name-normalizer";
 import type {
   ConfidenceTone,
@@ -24,7 +24,6 @@ interface DetailRow {
   label: string;
   standardizedValue: string;
   localValue?: string;
-  localReading?: string;
   confidence: number;
   nameConsistency?: number | null;
   lookupSource?: "OCR" | "조회" | null;
@@ -129,7 +128,6 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       label: "First name",
       standardizedValue: standardizedNames.firstName,
       localValue: result.local_first_name,
-      localReading: result.local_first_name_furigana,
       confidence: getDisplayedNameOcrConfidence(
         result.local_first_name,
         result.local_first_name_confidence,
@@ -142,7 +140,6 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       label: "Last name",
       standardizedValue: standardizedNames.lastName,
       localValue: result.local_last_name,
-      localReading: result.local_last_name_furigana,
       confidence: getDisplayedNameOcrConfidence(
         result.local_last_name,
         result.local_last_name_confidence,
@@ -155,7 +152,6 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
       label: "Middle name",
       standardizedValue: standardizedNames.middleName,
       localValue: result.local_middle_name,
-      localReading: result.local_middle_name_furigana,
       confidence: getDisplayedNameOcrConfidence(
         result.local_middle_name,
         result.local_middle_name_confidence,
@@ -358,56 +354,8 @@ function ResultRow({
 
 function derivePoiStandardizedNames(result: PoiVerificationResult) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
-  const firstName =
-    hasLatinScript(result.first_name) && result.first_name_confidence >= 0.72
-      ? result.first_name
-      : "";
-  const lastName =
-    hasLatinScript(result.last_name) && result.last_name_confidence >= 0.72
-      ? result.last_name
-      : "";
-  const middleName =
-    hasLatinScript(result.middle_name) && result.middle_name_confidence >= 0.72
-      ? result.middle_name
-      : "";
-  const componentNames = {
-    firstName,
-    lastName,
-    middleName,
-  };
-  const fallbackFullName = pickRomanizedPoiFullName(result);
-  const normalizedUserInput = normalizeLooseText(result.user_input_english_name);
-
-  if (firstName || lastName || middleName) {
-    if (fallbackFullName && normalizedUserInput) {
-      const directFullName = shouldUppercaseNames
-        ? [lastName, firstName, middleName].filter(Boolean).join(" ")
-        : [firstName, middleName, lastName].filter(Boolean).join(" ");
-
-      if (
-        scoreRomanizedFullNameCandidate(fallbackFullName, normalizedUserInput) >
-        scoreRomanizedFullNameCandidate(directFullName, normalizedUserInput)
-      ) {
-        return applyJapanesePoiNameCasing(
-          splitRomanizedPoiFullName(fallbackFullName, shouldUppercaseNames),
-          shouldUppercaseNames,
-        );
-      }
-    }
-
-    return applyJapanesePoiNameCasing(componentNames, shouldUppercaseNames);
-  }
-
-  if (!fallbackFullName) {
-    return {
-      firstName: "",
-      middleName: "",
-      lastName: "",
-    };
-  }
-
   return applyJapanesePoiNameCasing(
-    splitRomanizedPoiFullName(fallbackFullName, shouldUppercaseNames),
+    splitRomanizedPoiFullName(result.user_input_english_name, shouldUppercaseNames),
     shouldUppercaseNames,
   );
 }
@@ -416,12 +364,29 @@ function derivePoiNameConsistency(
   result: PoiVerificationResult,
   standardizedNames: { firstName: string; middleName: string; lastName: string },
 ) {
-  const inputName = splitInputName(result.user_input_english_name);
+  const shouldUppercaseNames = isJapaneseIssuedCountry(result);
+  const ocrNames = applyJapanesePoiNameCasing(
+    {
+      firstName:
+        result.first_name ||
+        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
+          .firstName,
+      middleName:
+        result.middle_name ||
+        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
+          .middleName,
+      lastName:
+        result.last_name ||
+        splitRomanizedPoiFullName(result.romanization_primary_full_name, shouldUppercaseNames)
+          .lastName,
+    },
+    shouldUppercaseNames,
+  );
 
   return {
-    firstName: scoreNameConsistency(standardizedNames.firstName, inputName.firstName),
-    lastName: scoreNameConsistency(standardizedNames.lastName, inputName.lastName),
-    middleName: scoreNameConsistency(standardizedNames.middleName, inputName.middleName),
+    firstName: scoreNameConsistency(ocrNames.firstName, standardizedNames.firstName),
+    lastName: scoreNameConsistency(ocrNames.lastName, standardizedNames.lastName),
+    middleName: scoreNameConsistency(ocrNames.middleName, standardizedNames.middleName),
   };
 }
 
@@ -432,57 +397,35 @@ function buildStatusReasons(result: VerificationResult) {
 }
 
 function buildPoiStatusReasons(result: PoiVerificationResult) {
-  const reasons: string[] = [];
-
-  if (
-    result.local_first_name &&
-    !result.local_first_name_furigana &&
-    result.local_first_name_confidence >= 0.85 &&
-    result.first_name_confidence > 0 &&
-    result.first_name_confidence < 0.8
-  ) {
-    reasons.push(
-      "로컬 이름 OCR은 비교적 선명하지만 후리가나가 없어 영문 독음 신뢰도가 낮습니다.",
-    );
+  if (result.review_status === "검토") {
+    return [buildPoiReviewSummary()];
   }
 
-  if (
-    result.local_last_name &&
-    !result.local_last_name_furigana &&
-    result.local_last_name_confidence >= 0.85 &&
-    result.last_name_confidence > 0 &&
-    result.last_name_confidence < 0.8
-  ) {
-    reasons.push(
-      "성 한자는 확인되지만 후리가나가 없어 로마자 독음을 하나로 확정하지 못했습니다.",
-    );
+  if (result.review_status === "불가") {
+    return ["문서로 보기 어렵거나 이름 정보가 확인되지 않아 사람이 확인해야 합니다."];
   }
 
-  if (result.name_match_reason && result.review_status !== "정상") {
-    reasons.push(result.name_match_reason);
-  }
-
-  for (const warning of result.warnings) {
-    if (!reasons.includes(warning)) {
-      reasons.push(warning);
-    }
-  }
-
-  if (result.review_status === "불가" && !reasons.length) {
-    reasons.push("앞면 이미지에서 신분 확인에 필요한 핵심 정보가 충분히 확인되지 않았습니다.");
-  }
-
-  return reasons.slice(0, 4);
+  return [];
 }
 
 function buildPorStatusReasons(result: PorVerificationResult) {
-  const reasons = [...result.warnings];
-
-  if (result.review_status === "불가" && !reasons.length) {
-    reasons.push("주소 증빙 문서로 보기 어려워 핵심 주소 정보를 확인하지 못했습니다.");
+  if (result.review_status === "검토") {
+    return [buildPorReviewSummary()];
   }
 
-  return reasons.slice(0, 4);
+  if (result.review_status === "불가") {
+    return ["문서로 보기 어렵거나 주소 정보가 확인되지 않아 사람이 확인해야 합니다."];
+  }
+
+  return [];
+}
+
+function buildPoiReviewSummary() {
+  return "이름 겹침은 크지만 영문화 표기가 다소 모호하다.";
+}
+
+function buildPorReviewSummary() {
+  return "주소는 보이지만 OCR 표기가 다소 모호하다.";
 }
 
 function getDisplayedNameOcrConfidence(
@@ -495,10 +438,8 @@ function getDisplayedNameOcrConfidence(
     return localConfidence;
   }
 
-  if (standardizedValue) {
-    return standardizedConfidence;
-  }
-
+  void standardizedValue;
+  void standardizedConfidence;
   return 0;
 }
 
@@ -546,48 +487,6 @@ function collapseJapaneseRomanizationVariant(value: string) {
     .replace(/oh/g, "o");
 }
 
-function splitInputName(value: string) {
-  const tokens = tokenizeRomanizedName(value);
-
-  if (!tokens.length) {
-    return { firstName: "", middleName: "", lastName: "" };
-  }
-
-  if (tokens.length === 1) {
-    return { firstName: tokens[0] ?? "", middleName: "", lastName: "" };
-  }
-
-  return {
-    firstName: tokens[0] ?? "",
-    middleName: tokens.slice(1, -1).join(" "),
-    lastName: tokens.at(-1) ?? "",
-  };
-}
-
-function pickRomanizedPoiFullName(result: PoiVerificationResult) {
-  const candidates = [result.romanization_primary_full_name, ...result.romanization_alternatives]
-    .map((value) => value.trim())
-    .filter((value) => hasLatinScript(value));
-
-  if (!candidates.length) {
-    return "";
-  }
-
-  const normalizedUserInput = normalizeLooseText(result.user_input_english_name);
-
-  if (!normalizedUserInput) {
-    return candidates[0] ?? "";
-  }
-
-  return (
-    [...candidates].sort(
-      (left, right) =>
-        scoreRomanizedFullNameCandidate(right, normalizedUserInput) -
-        scoreRomanizedFullNameCandidate(left, normalizedUserInput),
-    )[0] ?? ""
-  );
-}
-
 function splitRomanizedPoiFullName(fullName: string, preferSurnameFirst: boolean) {
   const tokens = tokenizeRomanizedName(fullName);
 
@@ -614,31 +513,6 @@ function splitRomanizedPoiFullName(fullName: string, preferSurnameFirst: boolean
   };
 }
 
-function scoreRomanizedFullNameCandidate(fullName: string, normalizedUserInput: string) {
-  const normalizedFullName = normalizeLooseText(fullName);
-  const tokens = tokenizeRomanizedName(fullName);
-  const normalizedWithoutMiddle = normalizeLooseText(
-    tokens.length > 1 ? [tokens[0], tokens.at(-1)].filter(Boolean).join(" ") : fullName,
-  );
-
-  if (normalizedFullName && normalizedFullName === normalizedUserInput) {
-    return 3;
-  }
-
-  if (normalizedWithoutMiddle && normalizedWithoutMiddle === normalizedUserInput) {
-    return 2;
-  }
-
-  const userTokens = normalizedUserInput.split(" ").filter(Boolean).sort().join(" ");
-  const candidateTokens = normalizedFullName.split(" ").filter(Boolean).sort().join(" ");
-
-  if (userTokens && userTokens === candidateTokens) {
-    return 1;
-  }
-
-  return 0;
-}
-
 function tokenizeRomanizedName(value: string) {
   return value
     .trim()
@@ -661,7 +535,9 @@ function isJapaneseIssuedCountry(result: PoiVerificationResult) {
     .map((value) => normalizeLooseText(value))
     .filter(Boolean);
 
-  return normalizedValues.some((value) => ["japan", "jp", "일본", "日本"].includes(value));
+  return normalizedValues.some((value) =>
+    ["japan", "jp", "日本", "일본"].includes(value),
+  );
 }
 
 function applyJapanesePoiNameCasing(
@@ -680,12 +556,5 @@ function applyJapanesePoiNameCasing(
 }
 
 function formatLocalDisplayValue(row: DetailRow) {
-  const localValue = row.localValue?.trim() ?? "";
-  const localReading = row.localReading?.trim() ?? "";
-
-  if (localValue && localReading) {
-    return `${localValue} (${localReading})`;
-  }
-
-  return localValue || localReading;
+  return row.localValue?.trim() ?? "";
 }

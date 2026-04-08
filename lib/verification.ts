@@ -1,4 +1,4 @@
-import { zodTextFormat } from "openai/helpers/zod";
+﻿import { zodTextFormat } from "openai/helpers/zod";
 import sharp from "sharp";
 
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
@@ -81,8 +81,6 @@ Rules:
 - Keep standardized values separate from the local OCR values.
 - local_full_name should preserve the original local-script full name when visible.
 - local_first_name, local_last_name, local_middle_name, and local_full_name must keep the original OCR script exactly when visible.
-- If the original local name is in kanji and a kana reading (furigana) is visible or clearly recoverable from the document, put it in the matching *_furigana field.
-- Never replace the original local OCR name with furigana. Keep the original in local_* and the reading in *_furigana.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
 - If name order is ambiguous, explain it in romanization_notes.
 - Write explanatory text fields such as document_quality_notes, gender_notes, romanization_notes, and warnings in Korean.
@@ -100,9 +98,10 @@ Rules:
 - If the image is rotated or the name field is vertical, mentally rotate it and read the \u6c0f\u540d field before extracting names.
 - If a Japanese local-script name is visible as surname followed by given name, keep that exact local order in local_full_name and split local_last_name/local_first_name accordingly.
 - For Japanese documents, local_issued_country should be \u65e5\u672c when the issuing country is Japan. Do not put a prefecture into local_issued_country.
-- If a Japanese given name in kanji has multiple plausible readings and no furigana is visible, keep the local kanji in local_* fields, lower confidence, and include multiple plausible romanizations in romanization_alternatives.
+- If a Japanese given name in kanji has multiple plausible readings and no explicit reading is visible, keep the local kanji in local_* fields and include plausible romanizations in romanization_alternatives.
 - Never output placeholder, example, or stereotyped names. If the actual name is unclear, leave the name fields blank instead of inventing a common Japanese name.
-- If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
+- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
+- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
 
 const POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
 You receive one residence-proof document image plus the user-selected document type and issuing country.
@@ -137,7 +136,8 @@ Rules:
   - Example: "上益城郡益城町安永529" should be split as country JAPAN, state KUMAMOTO, city KAMIMASHIKI-GUN, address_1 MASHIKI-MACHI, address_2 YASUNAGA 529, postal_code 861-2231.
   - When the local recipient address is "郡上市八幡町美山2455番地1", local_city must be "郡上市" and local_address_1 must be "八幡町美山". Do not split it as "郡" plus "上市八幡町美山".
 - Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
-- If the document is blurry, cropped, reflective, tilted, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.`;
+- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
+- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
 
 export async function verifyPoiDocument({
   englishName,
@@ -238,7 +238,6 @@ export async function verifyPoiDocument({
     ...localImageQuality.warnings,
     ...buildPoiWarnings(cleaned, {
       documentQualityConfidence,
-      genderWasHeldBack: !gender.gender,
       nameMatchRequiresReview: nameMatch.result === "manual_review",
     }),
   ]);
@@ -263,23 +262,17 @@ export async function verifyPoiDocument({
     nameMatch.result === "manual_review" || documentQualityConfidence < 0.55;
   const reviewStatus = derivePoiReviewStatusV2({
     manualReviewRequired,
-    documentType: cleaned.document_type || documentTypeHint.trim(),
-    documentTypeConfidence: cleaned.document_type_confidence,
-    documentNumber: cleaned.document_number,
-    documentNumberConfidence: cleaned.document_number_confidence,
-    issuedCountry: cleaned.issued_country || countryHint.trim(),
     nameMatchResult: nameMatch.result,
     nameMatchConfidence: nameMatch.confidence,
     firstName: cleaned.first_name,
     firstNameConfidence: cleaned.first_name_confidence,
+    localFirstNameConfidence: cleaned.local_first_name_confidence,
     lastName: cleaned.last_name,
     lastNameConfidence: cleaned.last_name_confidence,
+    localLastNameConfidence: cleaned.local_last_name_confidence,
     localFirstName: cleaned.local_first_name,
-    localFirstNameFurigana: cleaned.local_first_name_furigana,
     localLastName: cleaned.local_last_name,
-    localLastNameFurigana: cleaned.local_last_name_furigana,
     localFullName: cleaned.local_full_name,
-    localFullNameFurigana: cleaned.local_full_name_furigana,
     localFullNameConfidence: cleaned.local_full_name_confidence,
   });
 
@@ -620,11 +613,10 @@ async function extractPoiWithOpenAI({
     "Do not use the back side to populate first_name, last_name, middle_name, or local_full_name.",
     "Return local OCR text separately whenever it exists.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
-    "For local names, preserve the original OCR script in local_* fields and put any visible kana reading in the *_furigana fields.",
     "The server compares the extracted name with the user's input later. Do not use any external or assumed English spelling to fill extracted name fields.",
     "For Japanese IDs, read names from the front-side \u6c0f\u540d field only, even when the image is vertical or rotated.",
     "For Japanese IDs, never use \u4f4f\u6240 or address text for name fields.",
-    "If a Japanese kanji name has more than one plausible reading and no furigana is shown, keep the local kanji fields, lower the standardized-name confidence, and list plausible Latin spellings in romanization_alternatives.",
+    "If a Japanese kanji name has more than one plausible reading and no explicit reading is visible, keep the local kanji fields, lower the standardized-name confidence, and list plausible Latin spellings in romanization_alternatives.",
     "Do not infer gender without visible OCR label/value evidence.",
   ];
 
@@ -639,9 +631,6 @@ async function extractPoiWithOpenAI({
   }
 
   const userPrompt = userPromptLines.join("\n");
-  const rotatedFrontViews =
-    mode === "name_rescue" ? await buildPoiNameRescueImageInputs(frontBuffer) : [];
-
   const inputContent = [
     { type: "input_text" as const, text: userPrompt },
     {
@@ -649,18 +638,8 @@ async function extractPoiWithOpenAI({
       image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
       detail: "high" as const,
     },
-    ...rotatedFrontViews,
-    ...(mode !== "name_rescue" && backFile && backBuffer
-      ? [
-          {
-            type: "input_image" as const,
-            image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
-            detail: "high" as const,
-          },
-        ]
-      : []),
+    ...(mode === "name_rescue" ? await buildPoiNameRescueImageInputs(frontBuffer) : []),
   ];
-
   return executeOpenAiParse({
     schemaName: "poi_document_verification",
     inputContent,
@@ -685,9 +664,10 @@ async function extractPorWithOpenAI({
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
-    'Japanese split example 1: "郡上市八幡町美山2455番地1" -> city "GUJO-SHI", address_1 "HACHIMAN-CHO MIYAMA", address_2 "2455-1".',
-    'Japanese split example 2: "上益城郡益城町安永529" -> city "KAMIMASHIKI-GUN", address_1 "MASHIKI-MACHI", address_2 "YASUNAGA 529".',
-    'For the same examples, local_city should remain "郡上市" or "上益城郡", and local_address_1 should remain "八幡町美山" or "益城町".',
+    'Japanese split example 1: "郡上市八幡町美山2455番地1" -> state "GIFU", city "GUJO-SHI", address_1 "HACHIMAN-CHO MIYAMA", address_2 "2455-1", postal_code "501-4452".',
+    'Japanese split example 2: "上益城郡益城町安永529" -> state "KUMAMOTO", city "KAMIMASHIKI-GUN", address_1 "MASHIKI-MACHI", address_2 "YASUNAGA 529", postal_code "861-2231".',
+    'Japanese split example 3: "青森県青森市大字三内字沢部426番地17" -> state "AOMORI-KEN", city "AOMORI-SHI", address_1 "OAZA SANNAI", address_2 "AZA SAWABE 426-17", postal_code "038-0031".',
+    'For the same examples, local_state should remain "青森県" or "熊本県", local_city should remain "郡上市", "上益城郡", or "青森市", and local_address_1 should remain "八幡町美山", "益城町", or "大字三内".',
   ];
 
   if (mode === "address_rescue") {
@@ -702,6 +682,8 @@ async function extractPorWithOpenAI({
   }
 
   const userPrompt = userPromptLines.join("\n");
+  const rotatedAddressViews =
+    mode === "address_rescue" ? await buildPorAddressRescueImageInputs(buffer) : [];
 
   const inputContent = [
     { type: "input_text" as const, text: userPrompt },
@@ -710,6 +692,7 @@ async function extractPorWithOpenAI({
       image_url: `data:${documentFile.type};base64,${buffer.toString("base64")}`,
       detail: "high" as const,
     },
+    ...rotatedAddressViews,
   ];
 
   return executeOpenAiParse({
@@ -720,6 +703,23 @@ async function extractPorWithOpenAI({
   }) as Promise<OpenAiPorExtraction>;
 }
 
+
+async function buildPorAddressRescueImageInputs(buffer: Buffer) {
+  try {
+    const [clockwise, counterClockwise] = await Promise.all([
+      sharp(buffer).rotate(90).png().toBuffer(),
+      sharp(buffer).rotate(270).png().toBuffer(),
+    ]);
+
+    return [clockwise, counterClockwise].map((imageBuffer) => ({
+      type: "input_image" as const,
+      image_url: `data:image/png;base64,${imageBuffer.toString("base64")}`,
+      detail: "high" as const,
+    }));
+  } catch {
+    return [];
+  }
+}
 async function executeOpenAiParse({
   schemaName,
   inputContent,
@@ -1013,11 +1013,9 @@ function buildPoiWarnings(
   extraction: ReturnType<typeof sanitizePoiExtraction>,
   {
     documentQualityConfidence,
-    genderWasHeldBack,
     nameMatchRequiresReview,
   }: {
     documentQualityConfidence: number;
-    genderWasHeldBack: boolean;
     nameMatchRequiresReview: boolean;
   },
 ) {
@@ -1028,19 +1026,11 @@ function buildPoiWarnings(
   }
 
   if (!extraction.romanization_primary_full_name) {
-    warnings.push("주 영문화 전체 이름을 신뢰도 있게 추출하지 못했습니다.");
-  }
-
-  if (!extraction.date_of_birth) {
-    warnings.push("Date of birth를 신뢰도 있게 표준화하지 못했습니다.");
-  }
-
-  if (genderWasHeldBack) {
-    warnings.push("직접적인 OCR 근거가 부족하여 Gender는 비워두었습니다.");
+    warnings.push("이름의 영문화 표기를 확인하기 어렵습니다.");
   }
 
   if (nameMatchRequiresReview) {
-    warnings.push("이름 비교 결과는 수동 검토가 필요합니다.");
+    warnings.push("이름 정합성은 맞지만 영문화 표기가 다소 모호합니다.");
   }
 
   return warnings;
@@ -1079,244 +1069,70 @@ function buildPorWarnings(
   return warnings;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function derivePoiReviewStatus({
-  manualReviewRequired,
-  nameMatchResult,
-  nameMatchConfidence,
-  firstName,
-  firstNameConfidence,
-  lastName,
-  lastNameConfidence,
-  localFirstName,
-  localLastName,
-  localFullName,
-  localFullNameConfidence,
-}: {
-  manualReviewRequired: boolean;
-  nameMatchResult: PoiVerificationResult["name_match_result"];
-  nameMatchConfidence: number;
-  firstName: string;
-  firstNameConfidence: number;
-  lastName: string;
-  lastNameConfidence: number;
-  localFirstName: string;
-  localLastName: string;
-  localFullName: string;
-  localFullNameConfidence: number;
-}): ReviewStatus {
-  const hasFrontNameEvidence = Boolean(
-    localFullName || (firstName && lastName) || localFirstName || localLastName,
-  );
-  const nameFields = [
-    { value: firstName, confidence: firstNameConfidence },
-    { value: lastName, confidence: lastNameConfidence },
-    { value: localFirstName, confidence: firstNameConfidence },
-    { value: localLastName, confidence: lastNameConfidence },
-    { value: localFullName, confidence: localFullNameConfidence },
-  ];
-
-  if (!hasFrontNameEvidence) {
-    return "불가";
-  }
-
-  if (
-    nameMatchResult === "mismatch" ||
-    nameMatchResult === "possible_match" ||
-    nameMatchResult === "manual_review" ||
-    nameMatchConfidence < 0.78 ||
-    hasLowConfidencePresentField(nameFields, 0.68) ||
-    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
-  ) {
-    return "검토";
-  }
-
-  return "정상";
-}
-
-/* eslint-disable @typescript-eslint/no-unused-vars */
-// Legacy helper kept temporarily for comparison with the current POI status logic.
-function derivePoiReviewStatusEnhanced({
-  manualReviewRequired,
-  documentType: _documentType,
-  documentTypeConfidence: _documentTypeConfidence,
-  documentNumber: _documentNumber,
-  documentNumberConfidence: _documentNumberConfidence,
-  issuedCountry,
-  nameMatchResult,
-  nameMatchConfidence,
-  firstName,
-  firstNameConfidence,
-  lastName,
-  lastNameConfidence,
-  localFirstName,
-  localFirstNameFurigana,
-  localLastName,
-  localLastNameFurigana,
-  localFullName,
-  localFullNameFurigana,
-  localFullNameConfidence,
-}: {
-  manualReviewRequired: boolean;
-  documentType: string;
-  documentTypeConfidence: number;
-  documentNumber: string;
-  documentNumberConfidence: number;
-  issuedCountry: string;
-  nameMatchResult: PoiVerificationResult["name_match_result"];
-  nameMatchConfidence: number;
-  firstName: string;
-  firstNameConfidence: number;
-  lastName: string;
-  lastNameConfidence: number;
-  localFirstName: string;
-  localFirstNameFurigana: string;
-  localLastName: string;
-  localLastNameFurigana: string;
-  localFullName: string;
-  localFullNameFurigana: string;
-  localFullNameConfidence: number;
-}): ReviewStatus {
-  const hasFrontNameEvidence = Boolean(
-    localFullName || (firstName && lastName) || localFirstName || localLastName,
-  );
-  const nameFields = [
-    { value: firstName, confidence: firstNameConfidence },
-    { value: lastName, confidence: lastNameConfidence },
-    { value: localFirstName, confidence: firstNameConfidence },
-    { value: localLastName, confidence: lastNameConfidence },
-    { value: localFullName, confidence: localFullNameConfidence },
-  ];
-  const hasJapaneseIssuedCountry =
-    isJapaneseCountryValue(issuedCountry) ||
-    normalizeLooseText(issuedCountry) === "\u65e5\u672c";
-  const hasHanLocalName = [localFullName, localFirstName, localLastName].some((value) =>
-    containsHanScript(value),
-  );
-  const hasVisibleFurigana = Boolean(
-    localFullNameFurigana || localFirstNameFurigana || localLastNameFurigana,
-  );
-
-  if (!hasFrontNameEvidence) {
-    return "불가";
-  }
-
-  if (
-    nameMatchResult === "mismatch" ||
-    nameMatchResult === "likely_match" ||
-    nameMatchResult === "possible_match" ||
-    nameMatchResult === "manual_review" ||
-    nameMatchConfidence < 0.78 ||
-    hasLowConfidencePresentField(nameFields, 0.68) ||
-    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
-  ) {
-    return "검토";
-  }
-
-  if (
-    hasJapaneseIssuedCountry &&
-    hasHanLocalName &&
-    ((!hasVisibleFurigana && nameMatchResult !== "exact_match") ||
-      nameMatchConfidence < 0.96 ||
-      hasLowConfidencePresentField(nameFields, 0.85))
-  ) {
-    return "검토";
-  }
-
-  return "정상";
-}
-/* eslint-enable @typescript-eslint/no-unused-vars */
-
 function derivePoiReviewStatusV2({
   manualReviewRequired,
-  documentType,
-  documentTypeConfidence,
-  documentNumber,
-  documentNumberConfidence,
-  issuedCountry,
   nameMatchResult,
   nameMatchConfidence,
   firstName,
   firstNameConfidence,
   lastName,
   lastNameConfidence,
+  localFirstNameConfidence,
+  localLastNameConfidence,
   localFirstName,
-  localFirstNameFurigana,
   localLastName,
-  localLastNameFurigana,
   localFullName,
-  localFullNameFurigana,
   localFullNameConfidence,
 }: {
   manualReviewRequired: boolean;
-  documentType: string;
-  documentTypeConfidence: number;
-  documentNumber: string;
-  documentNumberConfidence: number;
-  issuedCountry: string;
   nameMatchResult: PoiVerificationResult["name_match_result"];
   nameMatchConfidence: number;
   firstName: string;
   firstNameConfidence: number;
   lastName: string;
   lastNameConfidence: number;
+  localFirstNameConfidence: number;
+  localLastNameConfidence: number;
   localFirstName: string;
-  localFirstNameFurigana: string;
   localLastName: string;
-  localLastNameFurigana: string;
   localFullName: string;
-  localFullNameFurigana: string;
   localFullNameConfidence: number;
 }): ReviewStatus {
   const hasFrontNameEvidence = Boolean(
     localFullName || (firstName && lastName) || localFirstName || localLastName,
   );
-  const hasCorePoiEvidence = Boolean(
-    (documentType && documentTypeConfidence >= 0.75) ||
-      (documentNumber && documentNumberConfidence >= 0.75),
-  );
-  const nameFields = [
-    { value: firstName, confidence: firstNameConfidence },
-    { value: lastName, confidence: lastNameConfidence },
-    { value: localFirstName, confidence: firstNameConfidence },
-    { value: localLastName, confidence: lastNameConfidence },
+  const ocrFields = [
+    { value: localFirstName || firstName, confidence: localFirstNameConfidence || firstNameConfidence },
+    { value: localLastName || lastName, confidence: localLastNameConfidence || lastNameConfidence },
     { value: localFullName, confidence: localFullNameConfidence },
   ];
-  const hasJapaneseIssuedCountry = isJapaneseCountryValue(issuedCountry);
-  const hasHanLocalName = [localFullName, localFirstName, localLastName].some((value) =>
-    containsHanScript(value),
-  );
-  const hasVisibleFurigana = Boolean(
-    localFullNameFurigana || localFirstNameFurigana || localLastNameFurigana,
-  );
 
   if (!hasFrontNameEvidence) {
-    return hasCorePoiEvidence ? "\uAC80\uD1A0" : "\uBD88\uAC00";
+    return "불가";
   }
 
   if (
     nameMatchResult === "mismatch" ||
-    nameMatchResult === "likely_match" ||
     nameMatchResult === "possible_match" ||
     nameMatchResult === "manual_review" ||
-    nameMatchConfidence < 0.78 ||
-    hasLowConfidencePresentField(nameFields, 0.68) ||
-    (manualReviewRequired && hasLowConfidencePresentField(nameFields, 0.82))
+    nameMatchConfidence < 0.78
   ) {
-    return "\uAC80\uD1A0";
+    return "검토";
   }
 
-  if (
-    hasJapaneseIssuedCountry &&
-    hasHanLocalName &&
-    ((!hasVisibleFurigana && nameMatchResult !== "exact_match") ||
-      nameMatchConfidence < 0.96 ||
-      hasLowConfidencePresentField(nameFields, 0.85))
-  ) {
-    return "\uAC80\uD1A0";
+  if (nameMatchResult === "likely_match" && nameMatchConfidence < 0.9) {
+    return "검토";
   }
 
-  return "\uC815\uC0C1";
+  if (hasLowConfidencePresentField(ocrFields, 0.55)) {
+    return "검토";
+  }
+
+  if (manualReviewRequired) {
+    return "검토";
+  }
+
+  return "정상";
 }
 
 function shouldRetryPorAddressExtraction(
@@ -1752,6 +1568,15 @@ function parseJapaneseRecipientAddress({
   }
 
   if (!nextLocalAddress1) {
+    const oazaAzaMatch = remainder.match(/^(大字[^字]+)(字.+)$/u);
+
+    if (oazaAzaMatch) {
+      nextLocalAddress1 = cleanText(oazaAzaMatch[1] ?? "");
+      remainder = cleanText(oazaAzaMatch[2] ?? "");
+    }
+  }
+
+  if (!nextLocalAddress1) {
     const chomeMatch = remainder.match(/^(.+?)([0-9０-９一二三四五六七八九十]+丁目.*)$/u);
 
     if (chomeMatch) {
@@ -1799,13 +1624,13 @@ function preferOriginalLocalPoiNameScripts<T extends {
   const fullNameHasHan = containsHanScript(fullName);
 
   if (fullNameHasHan && isKanaOnly(nextValue.local_last_name) && !nextValue.local_last_name_furigana) {
-    nextValue.local_last_name_furigana = nextValue.local_last_name;
     nextValue.local_last_name = splitFullName.lastName || "";
+    nextValue.local_last_name_furigana = "";
   }
 
   if (fullNameHasHan && isKanaOnly(nextValue.local_first_name) && !nextValue.local_first_name_furigana) {
-    nextValue.local_first_name_furigana = nextValue.local_first_name;
     nextValue.local_first_name = splitFullName.firstName || "";
+    nextValue.local_first_name_furigana = "";
   }
 
   if (
@@ -1813,22 +1638,11 @@ function preferOriginalLocalPoiNameScripts<T extends {
     isKanaOnly(nextValue.local_middle_name) &&
     !nextValue.local_middle_name_furigana
   ) {
-    nextValue.local_middle_name_furigana = nextValue.local_middle_name;
     nextValue.local_middle_name = "";
+    nextValue.local_middle_name_furigana = "";
   }
 
-  if (
-    !nextValue.local_full_name_furigana &&
-    (nextValue.local_last_name_furigana || nextValue.local_first_name_furigana)
-  ) {
-    nextValue.local_full_name_furigana = [
-      nextValue.local_last_name_furigana,
-      nextValue.local_first_name_furigana,
-      nextValue.local_middle_name_furigana,
-    ]
-      .filter(Boolean)
-      .join(" ");
-  }
+  nextValue.local_full_name_furigana = "";
 
   return nextValue;
 }
@@ -2333,3 +2147,4 @@ function formatDetailSuffix(status: number, code: string) {
 function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
+

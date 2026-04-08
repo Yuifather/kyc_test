@@ -7,7 +7,6 @@ const JAPAN_POST_ZIP_URL =
 const JAPAN_LABEL = "\u65e5\u672c";
 const NO_LISTING_TOWN = "\u4ee5\u4e0b\u306b\u63b2\u8f09\u304c\u306a\u3044\u5834\u5408";
 const CHOME_SUFFIX = "\u4e01\u76ee";
-const CITY_SUFFIX_PATTERN = /[\u5e02\u533a\u90e1]$/u;
 const MUNICIPALITY_SUFFIX_PATTERN = /[\u753a\u6751]$/u;
 const LEADING_TOWN_PATTERN =
   /^([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u30fc\u3005\u30f6\u30f5]+)(?=\d|[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u30fc\u3005\u30f6\u30f5]|$)/u;
@@ -54,7 +53,7 @@ export async function lookupJapanPostalCode({
       confidence: 0,
       source: "none",
       warning:
-        "일본 주소를 충분히 명확하게 분리하지 못해 우편번호 조회를 건너뛰었습니다.",
+        "\uc77c\ubcf8 \uc8fc\uc18c\ub97c \ucda9\ubd84\ud788 \uba85\ud655\ud558\uac8c \ubd84\ub9ac\ud558\uc9c0 \ubabb\ud574 \uc6b0\ud3b8\ubc88\ud638 \uc870\ud68c\ub97c \uac74\ub108\ub6f0\uc5c8\uc2b5\ub2c8\ub2e4.",
     };
   }
 
@@ -89,7 +88,7 @@ export async function lookupJapanPostalCode({
       confidence: 0,
       source: "none",
       warning:
-        "Japan Post 조회 결과가 여러 건이라 Postal code는 비워두었습니다.",
+        "Japan Post \uc870\ud68c \uacb0\uacfc\uac00 \uc5ec\ub7ec \uac74\uc774\ub77c Postal code\ub294 \ube48\uac12\uc73c\ub85c \ub450\uc5c8\uc2b5\ub2c8\ub2e4.",
     };
   }
 
@@ -98,7 +97,7 @@ export async function lookupJapanPostalCode({
     confidence: 0,
     source: "none",
     warning:
-      "현재 주소 분리 결과로는 Japan Post 데이터에서 Postal code를 찾지 못했습니다.",
+      "\ud604\uc7ac \uc8fc\uc18c \ubd84\ub9ac \uacb0\uacfc\ub85c\ub294 Japan Post \ub370\uc774\ud130\uc5d0\uc11c Postal code\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.",
   };
 }
 
@@ -173,9 +172,7 @@ function shouldUseJapanPostLookup({
     .map((value) => value.normalize("NFKC").toLowerCase().trim())
     .filter(Boolean);
 
-  return normalizedValues.some((value) =>
-    ["japan", "jp", JAPAN_LABEL].includes(value),
-  );
+  return normalizedValues.some((value) => ["japan", "jp", JAPAN_LABEL].includes(value));
 }
 
 function buildCityCandidates(localCity: string, localAddress1: string) {
@@ -187,7 +184,7 @@ function buildCityCandidates(localCity: string, localAddress1: string) {
     candidates.add(city);
   }
 
-  if (city && address1 && MUNICIPALITY_SUFFIX_PATTERN.test(address1) && !CITY_SUFFIX_PATTERN.test(city)) {
+  if (city && address1 && MUNICIPALITY_SUFFIX_PATTERN.test(address1)) {
     candidates.add(`${city}${address1}`);
   }
 
@@ -202,12 +199,21 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
 
   if (address1 && !address1IsMunicipality) {
     candidates.add(address1);
+
+    const strippedAddress1 = stripJapaneseTownPrefix(address1);
+    if (strippedAddress1) {
+      candidates.add(strippedAddress1);
+    }
   }
 
   const leadingTown = extractLeadingTown(address2);
-
   if (leadingTown) {
     candidates.add(leadingTown);
+
+    const strippedLeadingTown = stripJapaneseTownPrefix(leadingTown);
+    if (strippedLeadingTown) {
+      candidates.add(strippedLeadingTown);
+    }
   }
 
   const chomeMatch = address2.match(/^(\d{1,2})(?:-|$)/);
@@ -221,6 +227,10 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
   }
 
   return Array.from(candidates);
+}
+
+function stripJapaneseTownPrefix(value: string) {
+  return value.replace(/^(大字|字|小字)/u, "");
 }
 
 function extractLeadingTown(address2: string) {
@@ -289,19 +299,8 @@ function splitCsvLine(line: string) {
 }
 
 function toJapaneseNumeral(value: number) {
-  const numerals = [
-    "",
-    "\u4e00",
-    "\u4e8c",
-    "\u4e09",
-    "\u56db",
-    "\u4e94",
-    "\u516d",
-    "\u4e03",
-    "\u516b",
-    "\u4e5d",
-  ];
-  const ten = "\u5341";
+  const numerals = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+  const ten = "十";
 
   if (value <= 10) {
     return value === 10 ? ten : numerals[value] ?? "";

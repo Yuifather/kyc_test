@@ -18,34 +18,32 @@ export function inspectImageQuality(
     width = dimensions.width ?? 0;
     height = dimensions.height ?? 0;
   } catch {
-    notes.push("로컬 이미지 크기 점검에서 메타데이터를 읽지 못했습니다.");
+    notes.push(
+      "\ub85c\uceec \uc774\ubbf8\uc9c0 \ud06c\uae30 \ubd84\uc11d\uc5d0\uc11c \uba54\ud0c0\ub370\uc774\ud130\ub97c \uc77d\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.",
+    );
     confidence -= 0.08;
   }
 
   if (width && height) {
     const shortestSide = Math.min(width, height);
-    const longestSide = Math.max(width, height);
-    const aspectRatio = longestSide / shortestSide;
 
     if (shortestSide < 420) {
       confidence -= 0.2;
-      notes.push("이미지 해상도가 매우 낮아 OCR 정확도에 불리할 수 있습니다.");
-      warnings.push("해상도가 매우 낮아 OCR 신뢰도가 떨어질 수 있습니다.");
+      notes.push("\uc774\ubbf8\uc9c0 \ud574\uc0c1\ub3c4\uac00 \ub9e4\uc6b0 \ub0ae\uc544 OCR \uc815\ud655\ub3c4\uc5d0 \ubd88\ub9ac\ud569\ub2c8\ub2e4.");
+      warnings.push("\ud574\uc0c1\ub3c4\uac00 \ub0ae\uc544 OCR \uc2e0\ub8b0\ub3c4\uac00 \ub5a8\uc5b4\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4.");
     } else if (shortestSide < 640) {
       confidence -= 0.08;
-      notes.push("이미지 해상도가 아주 높지는 않지만 현재 크기에서도 OCR은 시도 가능합니다.");
-    }
-
-    if (aspectRatio > 2.8) {
-      confidence -= 0.12;
-      notes.push("문서 촬영치고는 이미지 비율이 비정상적입니다.");
-      warnings.push("문서 프레이밍이 좁거나 일부가 잘렸을 수 있습니다.");
+      notes.push(
+        "\uc774\ubbf8\uc9c0 \ud574\uc0c1\ub3c4\uac00 \ucda9\ubd84\ud788 \ub192\uc9c0 \uc54a\uc544 OCR \uc815\ud655\ub3c4\uac00 \ub2e4\uc18c \ub5a8\uc5b4\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4.",
+      );
     }
   }
 
   if (fileSize < 45 * 1024) {
     confidence -= 0.08;
-    notes.push("업로드한 파일 크기가 매우 작아 과도한 압축이 있었을 가능성이 있습니다.");
+    notes.push(
+      "\uc5c5\ub85c\ub4dc\ud55c \ud30c\uc77c \ud06c\uae30\uac00 \ub9e4\uc6b0 \uc791\uc544 \uacfc\ub3c4\ud55c \uc555\ucd95\uc774 \uc788\uc5c8\uc744 \uac00\ub2a5\uc131\uc774 \uc788\uc2b5\ub2c8\ub2e4.",
+    );
   }
 
   return {
