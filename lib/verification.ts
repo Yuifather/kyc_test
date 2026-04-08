@@ -48,6 +48,49 @@ interface OpenAIStyleError extends Error {
   type?: string | null;
 }
 
+function isJapaneseCountryHint(value: string) {
+  const normalized = normalizeLooseText(value);
+  return ["japan", "jp", "日本", "일본", "nihon", "nippon"].includes(normalized);
+}
+
+function buildPoiSystemPrompt(
+  countryHint: string,
+  mode: "default" | "name_rescue",
+) {
+  const sections = [GLOBAL_POI_SYSTEM_PROMPT];
+
+  if (isJapaneseCountryHint(countryHint)) {
+    sections.push(JAPANESE_POI_SYSTEM_PROMPT);
+  }
+
+  if (mode === "name_rescue") {
+    sections.push(
+      "Name rescue mode: focus on the front-side name fields only and produce conservative romanization alternatives when the reading is ambiguous.",
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildPorSystemPrompt(
+  countryHint: string,
+  mode: "default" | "address_rescue",
+) {
+  const sections = [GLOBAL_POR_SYSTEM_PROMPT];
+
+  if (isJapaneseCountryHint(countryHint)) {
+    sections.push(JAPANESE_POR_SYSTEM_PROMPT);
+  }
+
+  if (mode === "address_rescue") {
+    sections.push(
+      "Address rescue mode: focus on the recipient residence address, recover the best split for state, city, address_1, address_2, and postal_code, and ignore sender or issuer addresses.",
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
 interface VerifyPoiInput {
   englishName: string;
   countryHint: string;
@@ -62,7 +105,7 @@ interface VerifyPorInput {
   documentFile: File;
 }
 
-const POI_SYSTEM_PROMPT = `You are an identity document analyzer for POI (Proof of Identity).
+const GLOBAL_POI_SYSTEM_PROMPT = `You are an identity document analyzer for POI (Proof of Identity).
 You receive the front image of an ID and sometimes the back image, plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
@@ -93,17 +136,23 @@ Rules:
 - Extract person-name fields from the front side only.
 - If the front side does not show a readable person name, leave first_name, last_name, middle_name, and local_full_name blank.
 - Use the back side only for supplementary non-name fields that may appear there.
+- Never output placeholder, example, or stereotyped names. If the actual name is unclear, leave the name fields blank instead of inventing a common name.
+- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
+- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
+
+const JAPANESE_POI_SYSTEM_PROMPT = `Japanese POI-specific rules:
 - For Japanese identity documents, read the personal name only from the field labeled \u6c0f\u540d on the front side.
 - For Japanese driver's licenses and ID cards, do not use text from the \u4f4f\u6240 field or any address block for name fields.
 - If the image is rotated or the name field is vertical, mentally rotate it and read the \u6c0f\u540d field before extracting names.
 - If a Japanese local-script name is visible as surname followed by given name, keep that exact local order in local_full_name and split local_last_name/local_first_name accordingly.
 - For Japanese documents, local_issued_country should be \u65e5\u672c when the issuing country is Japan. Do not put a prefecture into local_issued_country.
-- If a Japanese given name in kanji has multiple plausible readings and no explicit reading is visible, keep the local kanji in local_* fields and include plausible romanizations in romanization_alternatives.
-- Never output placeholder, example, or stereotyped names. If the actual name is unclear, leave the name fields blank instead of inventing a common Japanese name.
-- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
-- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
+- If a Japanese kanji name has no explicit reading, generate multiple plausible Latin readings in romanization_alternatives from the document evidence and common Japanese name conventions.
+- Do not rely on a fixed lookup table in application code. The application compares the candidates you provide.
+- If multiple readings are plausible, keep the primary reading conservative and place the rest in romanization_alternatives.
+- Never collapse an ambiguous kanji name into a single reading when a better set of candidates is available.
+- Write romanization_notes in Korean and mention when the reading is ambiguous.`;
 
-const POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
+const GLOBAL_POR_SYSTEM_PROMPT = `You are a document analyzer for POR (Proof of Residence).
 You receive one residence-proof document image plus the user-selected document type and issuing country.
 Return only JSON that matches the provided schema.
 
@@ -125,19 +174,26 @@ Rules:
 - Ignore sender, issuer, office, branch, footer, contact, or return addresses unless they are clearly the recipient address.
 - On mailed notices, bills, giro slips, or utility documents, prefer the address block directly associated with the recipient name, often located above the recipient name and honorific.
 - local_full_address must contain only the selected recipient/addressee address block, not a concatenation of recipient and sender addresses.
+- Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
+- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
+- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
+
+const JAPANESE_POR_SYSTEM_PROMPT = `Japanese POR-specific rules:
 - For Japanese addresses:
   - country should be JAPAN.
   - state should be prefecture only.
   - city should contain the city/ward/district level. If both city and ward appear, include both in city.
-  - address_1 should contain the recipient-side local area below city level and before the numeric block/building/room. It may include sub-municipal area names such as HACHIMAN-CHO MIYAMA when that is the clearest recipient address split.
+  - address_1 should contain the recipient-side local area below city level and before the numeric block/building/room. It may include sub-municipal area names such as HACHIMAN-CHO MIYAMA or OAZA SANNAI when that is the clearest recipient address split.
   - address_2 should contain numbers, building names, and room numbers.
   - Standardized country/state/city/address_1/address_2 should be returned in uppercase Latin characters when possible.
   - Example: "501-4452 郡上市八幡町美山2455番地1" for the addressee should be split as country JAPAN, state GIFU, city GUJO-SHI, address_1 HACHIMAN-CHO MIYAMA, address_2 2455-1, postal_code 501-4452.
   - Example: "上益城郡益城町安永529" should be split as country JAPAN, state KUMAMOTO, city KAMIMASHIKI-GUN, address_1 MASHIKI-MACHI, address_2 YASUNAGA 529, postal_code 861-2231.
+  - Example: "青森県青森市大字三内字沢部426番地17" should be split as country JAPAN, state AOMORI-KEN, city AOMORI-SHI, address_1 OAZA SANNAI, address_2 AZA SAWABE 426-17, postal_code 038-0031.
   - When the local recipient address is "郡上市八幡町美山2455番地1", local_city must be "郡上市" and local_address_1 must be "八幡町美山". Do not split it as "郡" plus "上市八幡町美山".
-- Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
-- If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
-- Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
+  - When the local recipient address contains 大字 and 字, split them across address_1 and address_2 instead of mixing them into city.
+  - Keep state as prefecture with suffixes such as -KEN, -TO, -DO, or -FU when appropriate.
+  - Keep city as city/ward/district with suffixes such as -SHI, -KU, or -GUN when appropriate.
+- The application will use postal-code lookup when postal_code is not visible, so do not invent postal codes.`;
 
 export async function verifyPoiDocument({
   englishName,
@@ -606,7 +662,7 @@ async function extractPoiWithOpenAI({
     "The first uploaded image is the front side.",
     mode === "name_rescue"
       ? "This retry is focused only on the person's name from the front side."
-      : backFile && backBuffer
+    : backFile && backBuffer
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
     "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
@@ -614,9 +670,6 @@ async function extractPoiWithOpenAI({
     "Return local OCR text separately whenever it exists.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
     "The server compares the extracted name with the user's input later. Do not use any external or assumed English spelling to fill extracted name fields.",
-    "For Japanese IDs, read names from the front-side \u6c0f\u540d field only, even when the image is vertical or rotated.",
-    "For Japanese IDs, never use \u4f4f\u6240 or address text for name fields.",
-    "If a Japanese kanji name has more than one plausible reading and no explicit reading is visible, keep the local kanji fields, lower the standardized-name confidence, and list plausible Latin spellings in romanization_alternatives.",
     "Do not infer gender without visible OCR label/value evidence.",
   ];
 
@@ -643,7 +696,7 @@ async function extractPoiWithOpenAI({
   return executeOpenAiParse({
     schemaName: "poi_document_verification",
     inputContent,
-    systemPrompt: POI_SYSTEM_PROMPT,
+    systemPrompt: buildPoiSystemPrompt(countryHint, mode),
     schema: openAiPoiExtractionSchema,
   }) as Promise<OpenAiPoiExtraction>;
 }
@@ -664,10 +717,6 @@ async function extractPorWithOpenAI({
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
-    'Japanese split example 1: "郡上市八幡町美山2455番地1" -> state "GIFU", city "GUJO-SHI", address_1 "HACHIMAN-CHO MIYAMA", address_2 "2455-1", postal_code "501-4452".',
-    'Japanese split example 2: "上益城郡益城町安永529" -> state "KUMAMOTO", city "KAMIMASHIKI-GUN", address_1 "MASHIKI-MACHI", address_2 "YASUNAGA 529", postal_code "861-2231".',
-    'Japanese split example 3: "青森県青森市大字三内字沢部426番地17" -> state "AOMORI-KEN", city "AOMORI-SHI", address_1 "OAZA SANNAI", address_2 "AZA SAWABE 426-17", postal_code "038-0031".',
-    'For the same examples, local_state should remain "青森県" or "熊本県", local_city should remain "郡上市", "上益城郡", or "青森市", and local_address_1 should remain "八幡町美山", "益城町", or "大字三内".',
   ];
 
   if (mode === "address_rescue") {
@@ -698,7 +747,7 @@ async function extractPorWithOpenAI({
   return executeOpenAiParse({
     schemaName: "por_document_verification",
     inputContent,
-    systemPrompt: POR_SYSTEM_PROMPT,
+    systemPrompt: buildPorSystemPrompt(countryHint, mode),
     schema: openAiPorExtractionSchema,
   }) as Promise<OpenAiPorExtraction>;
 }
@@ -1145,10 +1194,9 @@ function shouldRetryPorAddressExtraction(
     documentTypeHint: string;
   },
 ) {
-  const normalizedCountry = normalizeLooseText(countryHint);
   const normalizedDocType = normalizeLooseText(documentTypeHint);
   const isJapaneseResidenceDocument =
-    ["japan", "jp", "日本"].includes(normalizedCountry) &&
+    isJapaneseCountryHint(countryHint) &&
     (normalizedDocType.includes("residence") ||
       normalizedDocType.includes("card") ||
       normalizedDocType.includes("permit"));
@@ -1256,8 +1304,7 @@ function hasLowConfidencePresentField(
 }
 
 function isJapaneseCountryValue(value: string) {
-  const normalized = normalizeLooseText(value);
-  return ["japan", "jp", "日本"].includes(normalized);
+  return isJapaneseCountryHint(value);
 }
 
 function shouldApplyJapanesePoiHeuristics(value: {
@@ -1375,9 +1422,7 @@ function shouldRunJapanesePoiNameRescue({
 }) {
   const normalizedDocType = normalizeLooseText(documentTypeHint);
   const isJapaneseDocument =
-    [countryHint, issuedCountry, localIssuedCountry].some(
-      (value) => isJapaneseCountryValue(value) || normalizeLooseText(value) === "\u65e5\u672c",
-    ) &&
+    [countryHint, issuedCountry, localIssuedCountry].some((value) => isJapaneseCountryValue(value)) &&
     (normalizedDocType.includes("driver") ||
       normalizedDocType.includes("license") ||
       normalizedDocType.includes("id") ||
