@@ -15,6 +15,7 @@ import {
   openAiPorExtractionSchema,
 } from "@/lib/openai-schema";
 import type {
+  DocumentIntegrityStatus,
   PoiVerificationResult,
   PorVerificationResult,
   ReviewStatus,
@@ -116,6 +117,14 @@ Rules:
 - All confidence values must be numbers between 0 and 1.
 - Keep manual_review_required false when optional fields are simply absent on the document.
 - Only set manual_review_required to true when image quality or core name evidence is too weak for reliable verification.
+- Assess document integrity separately from OCR quality.
+- document_integrity_status must be one of clean, suspected, or tampered.
+- Use tampered only when there are clear signs of editing, compositing, text replacement, cut-and-paste, or other fabrication artifacts.
+- Use suspected when the document shows mild or unclear signs of manipulation but not enough evidence to call it tampered.
+- Do not mark a document tampered merely because the required name is missing, hidden, covered, cropped, or unreadable.
+- Do not mark a document tampered merely because optional fields are hidden, blank, or obscured.
+- If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
+- Write document_integrity_notes in Korean when the status is suspected or tampered.
 - first_name, last_name, middle_name, document_type, issued_country, nationality, and place_of_birth must be standardized values.
 - first_name, last_name, and middle_name must be written in Latin script when visible and romanizable. Never put kanji, kana, hangul, hanzi, or other local script into these standardized fields.
 - issued_country should be a country name consistent with the document and user hint when confident, otherwise "".
@@ -169,6 +178,14 @@ Rules:
 - local_full_address should preserve the original OCR address string when visible.
 - address_notes should explain any segmentation ambiguity.
 - Write explanatory text fields such as document_quality_notes, address_notes, and warnings in Korean.
+- Assess document integrity separately from OCR quality.
+- document_integrity_status must be one of clean, suspected, or tampered.
+- Use tampered only when there are clear signs of editing, compositing, text replacement, cut-and-paste, or other fabrication artifacts.
+- Use suspected when the document shows mild or unclear signs of manipulation but not enough evidence to call it tampered.
+- Do not mark a document tampered merely because the recipient address is missing, hidden, covered, cropped, or unreadable.
+- Do not mark a document tampered merely because sender, issuer, office, footer, contact, or return-address fields are hidden, blank, or obscured.
+- If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
+- Write document_integrity_notes in Korean when the status is suspected or tampered.
 - Keep normalized data values such as document_type, issued_country, country/state/city/address fields, and dates in their required output format.
 - When multiple addresses are visible, always choose the recipient/addressee residence address for POR.
 - Ignore sender, issuer, office, branch, footer, contact, or return addresses unless they are clearly the recipient address.
@@ -293,6 +310,8 @@ export async function verifyPoiDocument({
     ...cleaned.warnings,
     ...localImageQuality.warnings,
     ...buildPoiWarnings(cleaned, {
+      documentIntegrityStatus: cleaned.document_integrity_status,
+      documentIntegrityNotes: cleaned.document_integrity_notes,
       documentQualityConfidence,
       nameMatchRequiresReview: nameMatch.result === "manual_review",
     }),
@@ -315,9 +334,12 @@ export async function verifyPoiDocument({
     ]),
   );
   const manualReviewRequired =
-    nameMatch.result === "manual_review" || documentQualityConfidence < 0.55;
+    nameMatch.result === "manual_review" ||
+    documentQualityConfidence < 0.55 ||
+    cleaned.document_integrity_status !== "clean";
   const reviewStatus = derivePoiReviewStatusV2({
     manualReviewRequired,
+    documentIntegrityStatus: cleaned.document_integrity_status,
     nameMatchResult: nameMatch.result,
     nameMatchConfidence: nameMatch.confidence,
     firstName: cleaned.first_name,
@@ -342,6 +364,8 @@ export async function verifyPoiDocument({
     document_number: cleaned.document_number,
     local_document_number: cleaned.local_document_number,
     document_number_confidence: cleaned.document_number_confidence,
+    document_integrity_status: cleaned.document_integrity_status,
+    document_integrity_notes: cleaned.document_integrity_notes,
     issued_country: cleaned.issued_country || countryHint.trim(),
     local_issued_country: cleaned.local_issued_country,
     issued_country_confidence: cleaned.issued_country_confidence,
@@ -456,6 +480,8 @@ export async function verifyPorDocument({
     ...cleaned.warnings,
     ...localImageQuality.warnings,
     ...buildPorWarnings(cleaned, {
+      documentIntegrityStatus: cleaned.document_integrity_status,
+      documentIntegrityNotes: cleaned.document_integrity_notes,
       documentQualityConfidence,
       postalLookupWarning: postalLookup.warning ?? "",
       hasPostalCode: Boolean(finalPostalCode),
@@ -481,12 +507,14 @@ export async function verifyPorDocument({
   const manualReviewRequired =
     cleaned.manual_review_required ||
     documentQualityConfidence < 0.55 ||
+    cleaned.document_integrity_status !== "clean" ||
     !cleaned.country ||
     !cleaned.state ||
     !cleaned.city ||
     !cleaned.address_1;
   const reviewStatus = derivePorReviewStatus({
     manualReviewRequired,
+    documentIntegrityStatus: cleaned.document_integrity_status,
     country: cleaned.country,
     countryConfidence: cleaned.country_confidence,
     localCountry: cleaned.local_country,
@@ -517,6 +545,8 @@ export async function verifyPorDocument({
     document_number: cleaned.document_number,
     local_document_number: cleaned.local_document_number,
     document_number_confidence: cleaned.document_number_confidence,
+    document_integrity_status: cleaned.document_integrity_status,
+    document_integrity_notes: cleaned.document_integrity_notes,
     issued_country: cleaned.issued_country || countryHint.trim(),
     local_issued_country: cleaned.local_issued_country,
     issued_country_confidence: cleaned.issued_country_confidence,
@@ -656,12 +686,14 @@ async function extractPoiWithOpenAI({
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POI document images and extract the requested fields.",
     "The first uploaded image is the front side.",
+    "Also assess whether the document looks clean, suspected, or tampered. Do not treat missing or hidden non-required fields as tampering.",
     mode === "name_rescue"
       ? "This retry is focused only on the person's name from the front side."
     : backFile && backBuffer
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
     "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
+    "If the required name is missing or unreadable but there are no other edit artifacts, leave document_integrity_status clean and let the app handle the missing required field.",
     "Do not use the back side to populate first_name, last_name, middle_name, or local_full_name.",
     "Return local OCR text separately whenever it exists.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
@@ -708,11 +740,13 @@ async function extractPorWithOpenAI({
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POR document image and extract the requested fields.",
+    "Also assess whether the document looks clean, suspected, or tampered. Do not treat missing or hidden non-required fields as tampering.",
     "Return local OCR text separately whenever it exists.",
     "Do not guess postal_code from the address. Leave it blank unless it is explicitly visible.",
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
+    "If the required recipient address is missing or unreadable but there are no other edit artifacts, leave document_integrity_status clean and let the app handle the missing required field.",
   ];
 
   if (mode === "address_rescue") {
@@ -852,6 +886,10 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
       : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
     document_quality_confidence: clampConfidence(extraction.document_quality_confidence),
     document_quality_notes: cleanText(extraction.document_quality_notes),
+    document_integrity_status: normalizeDocumentIntegrityStatus(
+      extraction.document_integrity_status,
+    ),
+    document_integrity_notes: cleanText(extraction.document_integrity_notes),
     first_name: cleanText(extraction.first_name),
     local_first_name: cleanText(extraction.local_first_name),
     first_name_confidence: clampConfidence(extraction.first_name_confidence),
@@ -970,6 +1008,10 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
       : clampConfidence(Math.min(extraction.date_of_expiry_confidence, 0.35)),
     document_quality_confidence: clampConfidence(extraction.document_quality_confidence),
     document_quality_notes: cleanText(extraction.document_quality_notes),
+    document_integrity_status: normalizeDocumentIntegrityStatus(
+      extraction.document_integrity_status,
+    ),
+    document_integrity_notes: cleanText(extraction.document_integrity_notes),
     country: cleanUppercaseText(extraction.country),
     local_country: cleanText(extraction.local_country),
     country_confidence: clampConfidence(extraction.country_confidence),
@@ -1053,14 +1095,25 @@ function rebalanceJapanesePorLocalAddress({
 function buildPoiWarnings(
   extraction: ReturnType<typeof sanitizePoiExtraction>,
   {
+    documentIntegrityStatus,
+    documentIntegrityNotes,
     documentQualityConfidence,
     nameMatchRequiresReview,
   }: {
+    documentIntegrityStatus: DocumentIntegrityStatus;
+    documentIntegrityNotes: string;
     documentQualityConfidence: number;
     nameMatchRequiresReview: boolean;
   },
 ) {
   const warnings: string[] = [];
+
+  warnings.push(
+    ...buildDocumentIntegrityWarnings({
+      status: documentIntegrityStatus,
+      notes: documentIntegrityNotes,
+    }),
+  );
 
   if (documentQualityConfidence < 0.55) {
     warnings.push("이미지 품질이 낮아 수동 검토가 권장됩니다.");
@@ -1080,16 +1133,27 @@ function buildPoiWarnings(
 function buildPorWarnings(
   extraction: ReturnType<typeof sanitizePorExtraction>,
   {
+    documentIntegrityStatus,
+    documentIntegrityNotes,
     documentQualityConfidence,
     postalLookupWarning,
     hasPostalCode,
   }: {
+    documentIntegrityStatus: DocumentIntegrityStatus;
+    documentIntegrityNotes: string;
     documentQualityConfidence: number;
     postalLookupWarning: string;
     hasPostalCode: boolean;
   },
 ) {
   const warnings: string[] = [];
+
+  warnings.push(
+    ...buildDocumentIntegrityWarnings({
+      status: documentIntegrityStatus,
+      notes: documentIntegrityNotes,
+    }),
+  );
 
   if (documentQualityConfidence < 0.55) {
     warnings.push("이미지 품질이 낮아 수동 검토가 권장됩니다.");
@@ -1112,6 +1176,7 @@ function buildPorWarnings(
 
 function derivePoiReviewStatusV2({
   manualReviewRequired,
+  documentIntegrityStatus,
   nameMatchResult,
   nameMatchConfidence,
   firstName,
@@ -1126,6 +1191,7 @@ function derivePoiReviewStatusV2({
   localFullNameConfidence,
 }: {
   manualReviewRequired: boolean;
+  documentIntegrityStatus: DocumentIntegrityStatus;
   nameMatchResult: PoiVerificationResult["name_match_result"];
   nameMatchConfidence: number;
   firstName: string;
@@ -1150,6 +1216,14 @@ function derivePoiReviewStatusV2({
 
   if (!hasFrontNameEvidence) {
     return "불가";
+  }
+
+  if (documentIntegrityStatus === "tampered") {
+    return "불가";
+  }
+
+  if (documentIntegrityStatus === "suspected") {
+    return "검토";
   }
 
   if (
@@ -1216,6 +1290,7 @@ function getPorAddressExtractionScore(extraction: ReturnType<typeof sanitizePorE
 
 function derivePorReviewStatus({
   manualReviewRequired,
+  documentIntegrityStatus,
   country,
   countryConfidence,
   localCountry,
@@ -1237,6 +1312,7 @@ function derivePorReviewStatus({
   postalCodeSource,
 }: {
   manualReviewRequired: boolean;
+  documentIntegrityStatus: DocumentIntegrityStatus;
   country: string;
   countryConfidence: number;
   localCountry: string;
@@ -1272,6 +1348,14 @@ function derivePorReviewStatus({
 
   if (!hasVisibleAddressEvidence) {
     return "불가";
+  }
+
+  if (documentIntegrityStatus === "tampered") {
+    return "불가";
+  }
+
+  if (documentIntegrityStatus === "suspected") {
+    return "검토";
   }
 
   if (
@@ -1314,6 +1398,56 @@ function shouldApplyJapanesePoiHeuristics(value: {
     (candidate) =>
       isJapaneseCountryValue(candidate) || normalizeLooseText(candidate) === "\u65e5\u672c",
   );
+}
+
+function normalizeDocumentIntegrityStatus(value: string): DocumentIntegrityStatus {
+  const normalized = normalizeLooseText(value);
+
+  if (
+    normalized === "tampered" ||
+    normalized === "forged" ||
+    normalized === "edited" ||
+    normalized === "manipulated" ||
+    normalized === "fabricated" ||
+    normalized.includes("변조") ||
+    normalized.includes("위조") ||
+    normalized.includes("조작")
+  ) {
+    return "tampered";
+  }
+
+  if (
+    normalized === "suspected" ||
+    normalized === "uncertain" ||
+    normalized === "ambiguous" ||
+    normalized === "possible" ||
+    normalized === "needsreview" ||
+    normalized.includes("의심") ||
+    normalized.includes("검토") ||
+    normalized.includes("가능성")
+  ) {
+    return "suspected";
+  }
+
+  return "clean";
+}
+
+function buildDocumentIntegrityWarnings({
+  status,
+  notes,
+}: {
+  status: DocumentIntegrityStatus;
+  notes: string;
+}) {
+  if (status === "clean") {
+    return [];
+  }
+
+  if (status === "tampered") {
+    return [notes || "문서 조작 또는 변조가 확인되어 불가입니다."];
+  }
+
+  return [notes || "문서 조작 또는 변조 가능성이 있어 수동 검토가 필요합니다."];
 }
 
 function normalizeJapanesePoiExtraction<

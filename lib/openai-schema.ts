@@ -30,6 +30,11 @@ const commonFields = {
   date_of_expiry_confidence: boundedConfidence,
   document_quality_confidence: boundedConfidence,
   document_quality_notes: blankString,
+  document_integrity_status: z
+    .enum(["clean", "suspected", "tampered"])
+    .catch("clean")
+    .default("clean"),
+  document_integrity_notes: blankString,
   overall_confidence: boundedConfidence,
   manual_review_required: z.boolean().catch(false).default(false),
   warnings: blankStringArray,

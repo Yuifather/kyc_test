@@ -19,6 +19,8 @@ export type GenderSource =
 
 export type PostalCodeSource = "ocr" | "lookup" | "none";
 
+export type DocumentIntegrityStatus = "clean" | "suspected" | "tampered";
+
 export type ReviewStatus =
   | "불가"
   | "검토"
@@ -57,6 +59,8 @@ export interface BaseVerificationResult {
   date_of_expiry_confidence: number;
   document_quality_confidence: number;
   document_quality_notes: string;
+  document_integrity_status: DocumentIntegrityStatus;
+  document_integrity_notes: string;
   overall_confidence: number;
   manual_review_required: boolean;
   warnings: string[];
