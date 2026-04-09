@@ -123,6 +123,7 @@ Rules:
 - Use suspected when the document shows mild or unclear signs of manipulation but not enough evidence to call it tampered.
 - Do not mark a document tampered merely because the required name is missing, hidden, covered, cropped, or unreadable.
 - Do not mark a document tampered merely because optional fields are hidden, blank, or obscured.
+- Treat screenshots, screen captures, digitally generated mockups, photo-edit composites, printed-and-rephotographed copies, and other non-camera captures of the physical document as tampered.
 - If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
 - Write document_integrity_notes in Korean when the status is suspected or tampered.
 - first_name, last_name, middle_name, document_type, issued_country, nationality, and place_of_birth must be standardized values.
@@ -134,6 +135,8 @@ Rules:
 - local_full_name should preserve the original local-script full name when visible.
 - local_first_name, local_last_name, local_middle_name, and local_full_name must keep the original OCR script exactly when visible.
 - Provide one primary romanized full name plus alternative romanizations when more than one is plausible.
+- Also provide field-specific candidate arrays for first_name_romanization_candidates, middle_name_romanization_candidates, and last_name_romanization_candidates when a local-script name can be romanized.
+- Each field-specific candidate array should contain plausible Latin-script spellings for that exact name part. The application uses these candidates to score name consistency.
 - If name order is ambiguous, explain it in romanization_notes.
 - Write explanatory text fields such as document_quality_notes, gender_notes, romanization_notes, and warnings in Korean.
 - Keep normalized data values such as document_type, issued_country, romanized names, and dates in their required output format.
@@ -156,6 +159,8 @@ const JAPANESE_POI_SYSTEM_PROMPT = `Japanese POI-specific rules:
 - If a Japanese local-script name is visible as surname followed by given name, keep that exact local order in local_full_name and split local_last_name/local_first_name accordingly.
 - For Japanese documents, local_issued_country should be \u65e5\u672c when the issuing country is Japan. Do not put a prefecture into local_issued_country.
 - If a Japanese kanji name has no explicit reading, generate multiple plausible Latin readings in romanization_alternatives from the document evidence and common Japanese name conventions.
+- For Japanese names, also populate first_name_romanization_candidates, middle_name_romanization_candidates, and last_name_romanization_candidates with the best plausible readings for each corresponding field.
+- These field-specific candidate arrays should include single-field readings such as MIYAGAWA for 宮川 and KATSU / CHIKARA / RIKI / TSUTOMU when the character 力 is ambiguous.
 - Do not rely on a fixed lookup table in application code. The application compares the candidates you provide.
 - If multiple readings are plausible, keep the primary reading conservative and place the rest in romanization_alternatives.
 - Never collapse an ambiguous kanji name into a single reading when a better set of candidates is available.
@@ -184,6 +189,7 @@ Rules:
 - Use suspected when the document shows mild or unclear signs of manipulation but not enough evidence to call it tampered.
 - Do not mark a document tampered merely because the recipient address is missing, hidden, covered, cropped, or unreadable.
 - Do not mark a document tampered merely because sender, issuer, office, footer, contact, or return-address fields are hidden, blank, or obscured.
+- Treat screenshots, screen captures, digitally generated mockups, photo-edit composites, printed-and-rephotographed copies, and other non-camera captures of the physical document as tampered.
 - If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
 - Write document_integrity_notes in Korean when the status is suspected or tampered.
 - Keep normalized data values such as document_type, issued_country, country/state/city/address fields, and dates in their required output format.
@@ -409,6 +415,9 @@ export async function verifyPoiDocument({
     romanization_primary_full_name: cleaned.romanization_primary_full_name,
     romanization_alternatives: cleaned.romanization_alternatives,
     romanization_notes: cleaned.romanization_notes,
+    first_name_romanization_candidates: cleaned.first_name_romanization_candidates,
+    middle_name_romanization_candidates: cleaned.middle_name_romanization_candidates,
+    last_name_romanization_candidates: cleaned.last_name_romanization_candidates,
     name_match_result: nameMatch.result,
     name_match_confidence: nameMatch.confidence,
     name_match_reason: nameMatch.reason,
@@ -928,6 +937,21 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
         .filter(Boolean),
     ),
     romanization_notes: cleanText(extraction.romanization_notes),
+    first_name_romanization_candidates: uniqueNameList(
+      extraction.first_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
+    middle_name_romanization_candidates: uniqueNameList(
+      extraction.middle_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
+    last_name_romanization_candidates: uniqueNameList(
+      extraction.last_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
     overall_confidence: clampConfidence(extraction.overall_confidence),
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
@@ -1586,7 +1610,10 @@ function mergePoiNameExtraction<
     romanization_alternatives: string[];
     romanization_notes: string;
     overall_confidence: number;
-    warnings: string[];
+  warnings: string[];
+    first_name_romanization_candidates: string[];
+    middle_name_romanization_candidates: string[];
+    last_name_romanization_candidates: string[];
   },
 >(baseValue: T, rescueValue: T) {
   return {
@@ -1608,6 +1635,18 @@ function mergePoiNameExtraction<
     romanization_primary_full_name: rescueValue.romanization_primary_full_name,
     romanization_alternatives: rescueValue.romanization_alternatives,
     romanization_notes: rescueValue.romanization_notes,
+    first_name_romanization_candidates: uniqueNameList([
+      ...baseValue.first_name_romanization_candidates,
+      ...rescueValue.first_name_romanization_candidates,
+    ]),
+    middle_name_romanization_candidates: uniqueNameList([
+      ...baseValue.middle_name_romanization_candidates,
+      ...rescueValue.middle_name_romanization_candidates,
+    ]),
+    last_name_romanization_candidates: uniqueNameList([
+      ...baseValue.last_name_romanization_candidates,
+      ...rescueValue.last_name_romanization_candidates,
+    ]),
     overall_confidence: averageConfidence([
       baseValue.overall_confidence,
       rescueValue.overall_confidence,

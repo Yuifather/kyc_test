@@ -74,6 +74,9 @@ export const openAiPoiExtractionSchema = z.object({
   romanization_primary_full_name: blankString,
   romanization_alternatives: blankStringArray,
   romanization_notes: blankString,
+  first_name_romanization_candidates: blankStringArray,
+  middle_name_romanization_candidates: blankStringArray,
+  last_name_romanization_candidates: blankStringArray,
 });
 
 export const openAiPorExtractionSchema = z.object({

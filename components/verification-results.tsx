@@ -365,11 +365,6 @@ function derivePoiNameConsistency(
   standardizedNames: { firstName: string; middleName: string; lastName: string },
 ) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
-  const romanizationCandidates = uniqueNameList([
-    result.romanization_primary_full_name,
-    ...result.romanization_alternatives,
-  ]);
-
   const bestScores: { firstName: number | null; middleName: number | null; lastName: number | null } =
     {
       firstName: null,
@@ -377,35 +372,113 @@ function derivePoiNameConsistency(
       lastName: null,
     };
 
-  for (const candidate of romanizationCandidates) {
-    const candidateSplits = [
-      splitRomanizedPoiFullName(candidate, false),
-      splitRomanizedPoiFullName(candidate, true),
-    ];
+  const firstNameCandidates = collectPoiNameConsistencyCandidates(result, "firstName");
+  const middleNameCandidates = collectPoiNameConsistencyCandidates(result, "middleName");
+  const lastNameCandidates = collectPoiNameConsistencyCandidates(result, "lastName");
 
-    for (const candidateSplit of candidateSplits) {
-      const normalizedCandidate = applyJapanesePoiNameCasing(candidateSplit, shouldUppercaseNames);
-
-      bestScores.firstName = mergeNameConsistencyScore(
-        bestScores.firstName,
-        scoreNameConsistency(standardizedNames.firstName, normalizedCandidate.firstName),
-      );
-      bestScores.middleName = mergeNameConsistencyScore(
-        bestScores.middleName,
-        scoreNameConsistency(standardizedNames.middleName, normalizedCandidate.middleName),
-      );
-      bestScores.lastName = mergeNameConsistencyScore(
-        bestScores.lastName,
-        scoreNameConsistency(standardizedNames.lastName, normalizedCandidate.lastName),
-      );
-    }
-  }
+  bestScores.firstName = scoreNameCandidatesAgainstStandardized(
+    standardizedNames.firstName,
+    firstNameCandidates,
+    shouldUppercaseNames,
+    "firstName",
+  );
+  bestScores.middleName = scoreNameCandidatesAgainstStandardized(
+    standardizedNames.middleName,
+    middleNameCandidates,
+    shouldUppercaseNames,
+    "middleName",
+  );
+  bestScores.lastName = scoreNameCandidatesAgainstStandardized(
+    standardizedNames.lastName,
+    lastNameCandidates,
+    shouldUppercaseNames,
+    "lastName",
+  );
 
   return {
     firstName: bestScores.firstName,
     lastName: bestScores.lastName,
     middleName: bestScores.middleName,
   };
+}
+
+function collectPoiNameConsistencyCandidates(
+  result: PoiVerificationResult,
+  field: "firstName" | "middleName" | "lastName",
+) {
+  const fieldCandidates =
+    field === "firstName"
+      ? result.first_name_romanization_candidates
+      : field === "middleName"
+        ? result.middle_name_romanization_candidates
+        : result.last_name_romanization_candidates;
+
+  const baseCandidates = uniqueNameList([
+    result.romanization_primary_full_name,
+    ...result.romanization_alternatives,
+    ...fieldCandidates,
+  ]);
+
+  const expandedCandidates: string[] = [];
+
+  for (const candidate of baseCandidates) {
+    const candidateSplits = [
+      splitRomanizedPoiFullName(candidate, false),
+      splitRomanizedPoiFullName(candidate, true),
+    ];
+
+    expandedCandidates.push(candidate);
+
+    for (const candidateSplit of candidateSplits) {
+      const selectedValue =
+        field === "firstName"
+          ? candidateSplit.firstName
+          : field === "middleName"
+            ? candidateSplit.middleName
+            : candidateSplit.lastName;
+
+      if (selectedValue) {
+        expandedCandidates.push(selectedValue);
+      }
+    }
+  }
+
+  return uniqueNameList(expandedCandidates).map((candidate) =>
+    applyJapanesePoiNameCasing(
+      {
+        firstName: field === "firstName" ? candidate : "",
+        middleName: field === "middleName" ? candidate : "",
+        lastName: field === "lastName" ? candidate : "",
+      },
+      false,
+    ),
+  );
+}
+
+function scoreNameCandidatesAgainstStandardized(
+  standardizedValue: string,
+  candidates: Array<{ firstName: string; middleName: string; lastName: string }>,
+  shouldUppercaseNames: boolean,
+  field: "firstName" | "middleName" | "lastName",
+) {
+  let bestScore: number | null = null;
+
+  for (const candidate of candidates) {
+    const normalizedCandidate = applyJapanesePoiNameCasing(candidate, shouldUppercaseNames);
+    const candidateValue =
+      field === "firstName"
+        ? normalizedCandidate.firstName
+        : field === "middleName"
+          ? normalizedCandidate.middleName
+          : normalizedCandidate.lastName;
+
+    bestScore = mergeNameConsistencyScore(
+      bestScore,
+      scoreNameConsistency(standardizedValue, candidateValue),
+    );
+  }
+
+  return bestScore;
 }
 
 function buildStatusReasons(result: VerificationResult) {

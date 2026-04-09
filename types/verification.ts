@@ -101,6 +101,9 @@ export interface PoiVerificationResult extends BaseVerificationResult {
   romanization_primary_full_name: string;
   romanization_alternatives: string[];
   romanization_notes: string;
+  first_name_romanization_candidates: string[];
+  middle_name_romanization_candidates: string[];
+  last_name_romanization_candidates: string[];
   name_match_result: MatchResult;
   name_match_confidence: number;
   name_match_reason: string;
