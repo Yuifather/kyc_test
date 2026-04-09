@@ -124,5 +124,14 @@ export const openAiPorExtractionSchema = z.object({
   address_notes: blankString,
 });
 
+export const openAiDocumentNumberRescueSchema = z.object({
+  document_number: blankString,
+  local_document_number: blankString,
+  document_number_confidence: boundedConfidence,
+});
+
 export type OpenAiPoiExtraction = z.infer<typeof openAiPoiExtractionSchema>;
 export type OpenAiPorExtraction = z.infer<typeof openAiPorExtractionSchema>;
+export type OpenAiDocumentNumberRescueExtraction = z.infer<
+  typeof openAiDocumentNumberRescueSchema
+>;

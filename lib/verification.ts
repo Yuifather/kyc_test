@@ -1,4 +1,5 @@
 ﻿import { zodTextFormat } from "openai/helpers/zod";
+import { z } from "zod";
 
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
 import { resolveGenderExtraction } from "@/lib/gender-extraction";
@@ -8,8 +9,10 @@ import { matchRomanizedName } from "@/lib/name-matcher";
 import { normalizeLooseText, uniqueNameList } from "@/lib/name-normalizer";
 import { getModelCandidates, getOpenAIClient } from "@/lib/openai";
 import {
+  type OpenAiDocumentNumberRescueExtraction,
   type OpenAiPoiExtraction,
   type OpenAiPorExtraction,
+  openAiDocumentNumberRescueSchema,
   openAiPoiExtractionSchema,
   openAiPorExtractionSchema,
 } from "@/lib/openai-schema";
@@ -344,7 +347,7 @@ export async function verifyPoiDocument({
       documentNumberConfidence: cleaned.document_number_confidence,
     })
   ) {
-    const documentNumberRescueExtraction = await extractPoiWithOpenAI({
+    const documentNumberRescueExtraction = await extractPoiDocumentNumberWithOpenAI({
       englishName,
       countryHint,
       documentTypeHint,
@@ -352,14 +355,10 @@ export async function verifyPoiDocument({
       backFile,
       frontBuffer,
       backBuffer,
-      mode: "document_number_rescue",
     });
-    const documentNumberRescueCleaned = normalizePoiDocumentNumberForType(
-      sanitizePoiExtraction(documentNumberRescueExtraction),
-      {
-        countryHint,
-        documentTypeHint,
-      },
+    const documentNumberRescueCleaned = normalizePoiDocumentNumberRescueExtraction(
+      documentNumberRescueExtraction,
+      { countryHint, documentTypeHint },
     );
 
     if (isBetterPoiDocumentNumberExtraction(cleaned, documentNumberRescueCleaned)) {
@@ -574,20 +573,16 @@ export async function verifyPorDocument({
       documentTypeHint,
     })
   ) {
-    const documentNumberRescueExtraction = await extractPorWithOpenAI({
+    const documentNumberRescueExtraction = await extractPorDocumentNumberWithOpenAI({
       englishName,
       countryHint,
       documentTypeHint,
       documentFile,
       buffer,
-      mode: "document_number_rescue",
     });
-    const documentNumberRescueCleaned = normalizePorDocumentNumberForType(
-      sanitizePorExtraction(documentNumberRescueExtraction),
-      {
-        countryHint,
-        documentTypeHint,
-      },
+    const documentNumberRescueCleaned = normalizePorDocumentNumberRescueExtraction(
+      documentNumberRescueExtraction,
+      { countryHint, documentTypeHint },
     );
 
     if (
@@ -1044,6 +1039,77 @@ async function extractPoiWithOpenAI({
   }) as Promise<OpenAiPoiExtraction>;
 }
 
+async function extractPoiDocumentNumberWithOpenAI({
+  countryHint,
+  documentTypeHint,
+  frontFile,
+  backFile,
+  frontBuffer,
+  backBuffer,
+}: VerifyPoiInput & {
+  frontBuffer: Buffer;
+  backBuffer?: Buffer;
+}): Promise<OpenAiDocumentNumberRescueExtraction> {
+  const typeFingerprint = buildDocumentTypeFingerprint(documentTypeHint);
+  const inputContent: Array<
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; image_url: string; detail: "high" }
+  > = [
+    {
+      type: "input_text",
+      text: [
+        `Issued country: ${countryHint.trim()}`,
+        `Document type: ${documentTypeHint.trim()}`,
+        "Focus only on the document_number field.",
+        "Return only document_number, local_document_number, and document_number_confidence.",
+        "Do not output any other fields.",
+        "Ignore names, addresses, dates, gender, issuer, municipality codes, postal codes, phone numbers, barcodes, QR codes, certificate expiry markings, and decorative serials.",
+        "The image must still be treated as a full original image; inspect the whole uploaded image and do not crop mentally to only one region.",
+        isJapaneseCountryHint(countryHint) && isJapaneseIndividualNumberCardType(typeFingerprint)
+          ? "For Japanese My Number Cards / Individual Number Cards, prioritize the back-side 12-digit 個人番号 shown in grouped boxes next to the label 個人番号. Read those digits exactly."
+          : isJapaneseCountryHint(countryHint) && isJapaneseDriversLicenseType(typeFingerprint)
+            ? "For Japanese driver's licenses, prioritize the front-side number field labeled 番号 and return that number exactly."
+            : "Use only an explicit document-number field when one is visible.",
+      ].join("\n"),
+    },
+  ];
+
+  if (
+    isJapaneseCountryHint(countryHint) &&
+    isJapaneseIndividualNumberCardType(typeFingerprint) &&
+    backFile &&
+    backBuffer
+  ) {
+    inputContent.push({
+      type: "input_image",
+      image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
+      detail: "high",
+    });
+  } else {
+    inputContent.push({
+      type: "input_image",
+      image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
+      detail: "high",
+    });
+
+    if (backFile && backBuffer && !isJapaneseDriversLicenseType(typeFingerprint)) {
+      inputContent.push({
+        type: "input_image",
+        image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
+        detail: "high",
+      });
+    }
+  }
+
+  return executeOpenAiParse({
+    schemaName: "poi_document_number_rescue",
+    inputContent,
+    systemPrompt: buildPoiSystemPrompt(countryHint, "document_number_rescue"),
+    schema: openAiDocumentNumberRescueSchema,
+    maxOutputTokens: 120,
+  });
+}
+
 async function extractPorWithOpenAI({
   englishName: _englishName,
   countryHint,
@@ -1122,7 +1188,46 @@ async function extractPorWithOpenAI({
           : 1500,
   }) as Promise<OpenAiPorExtraction>;
 }
-async function executeOpenAiParse({
+
+async function extractPorDocumentNumberWithOpenAI({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+  buffer,
+}: VerifyPorInput & {
+  buffer: Buffer;
+}): Promise<OpenAiDocumentNumberRescueExtraction> {
+  const inputContent = [
+    {
+      type: "input_text" as const,
+      text: [
+        `Issued country: ${countryHint.trim()}`,
+        `Document type: ${documentTypeHint.trim()}`,
+        "Focus only on document_number.",
+        "Return only document_number, local_document_number, and document_number_confidence.",
+        "Do not output any other fields.",
+        "Inspect the whole uploaded document image.",
+        "Document_number may appear outside the recipient block, but it must come from an explicit number field or label.",
+        "On utility bills, giro slips, statements, and mailed notices, never use phone numbers, postal codes, dates, amounts, barcode payloads, QR payloads, or recipient-address digits as document_number.",
+        "Use customer/account/reference/contract/document numbers only when a dedicated label or dedicated number box clearly indicates that number.",
+      ].join("\n"),
+    },
+    {
+      type: "input_image" as const,
+      image_url: `data:${documentFile.type};base64,${buffer.toString("base64")}`,
+      detail: "high" as const,
+    },
+  ];
+
+  return executeOpenAiParse({
+    schemaName: "por_document_number_rescue",
+    inputContent,
+    systemPrompt: buildPorSystemPrompt(countryHint, "document_number_rescue"),
+    schema: openAiDocumentNumberRescueSchema,
+    maxOutputTokens: 140,
+  });
+}
+async function executeOpenAiParse<TSchema extends z.ZodTypeAny>({
   schemaName,
   inputContent,
   systemPrompt,
@@ -1135,11 +1240,9 @@ async function executeOpenAiParse({
     | { type: "input_image"; image_url: string; detail: "high" }
   >;
   systemPrompt: string;
-  schema:
-    | typeof openAiPoiExtractionSchema
-    | typeof openAiPorExtractionSchema;
+  schema: TSchema;
   maxOutputTokens?: number;
-}) {
+}): Promise<z.infer<TSchema>> {
   const client = getOpenAIClient();
   const modelCandidates = getModelCandidates();
   let lastError: unknown;
@@ -2270,6 +2373,28 @@ function normalizePoiDocumentNumberForType<
   return nextValue;
 }
 
+function normalizePoiDocumentNumberRescueExtraction(
+  extraction: OpenAiDocumentNumberRescueExtraction,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  return normalizePoiDocumentNumberForType(
+    {
+      document_type: documentTypeHint,
+      local_document_type: "",
+      document_number: cleanDocumentNumberText(extraction.document_number),
+      local_document_number: cleanDocumentNumberText(extraction.local_document_number),
+      document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    },
+    { countryHint, documentTypeHint },
+  );
+}
+
 function normalizePorDocumentNumberForType<
   T extends {
     document_type: string;
@@ -2346,6 +2471,28 @@ function normalizePorDocumentNumberForType<
   };
 }
 
+function normalizePorDocumentNumberRescueExtraction(
+  extraction: OpenAiDocumentNumberRescueExtraction,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  return normalizePorDocumentNumberForType(
+    {
+      document_type: documentTypeHint,
+      local_document_type: "",
+      document_number: cleanDocumentNumberText(extraction.document_number),
+      local_document_number: cleanDocumentNumberText(extraction.local_document_number),
+      document_number_confidence: clampConfidence(extraction.document_number_confidence),
+    },
+    { countryHint, documentTypeHint },
+  );
+}
+
 function shouldRunPoiDocumentNumberRescue({
   countryHint,
   documentTypeHint,
@@ -2392,31 +2539,43 @@ function shouldRunPoiDocumentNumberRescue({
 }
 
 function isBetterPoiDocumentNumberExtraction<
-  T extends {
+  TBase extends {
     document_type: string;
     local_document_type: string;
     document_number: string;
     local_document_number: string;
     document_number_confidence: number;
   },
->(baseValue: T, rescueValue: T) {
+  TRescue extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(baseValue: TBase, rescueValue: TRescue) {
   return scorePoiDocumentNumberCandidate(rescueValue) > scorePoiDocumentNumberCandidate(baseValue);
 }
 
 function mergePoiDocumentNumberExtraction<
-  T extends {
+  TBase extends {
     document_number: string;
     local_document_number: string;
     document_number_confidence: number;
     warnings: string[];
   },
->(baseValue: T, rescueValue: T) {
+  TRescue extends {
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(baseValue: TBase, rescueValue: TRescue) {
   return {
     ...baseValue,
     document_number: rescueValue.document_number,
     local_document_number: rescueValue.local_document_number,
     document_number_confidence: rescueValue.document_number_confidence,
-    warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
+    warnings: uniqueStrings([...baseValue.warnings]),
   };
 }
 
@@ -2459,9 +2618,24 @@ function shouldRunPorDocumentNumberRescue(
   return false;
 }
 
-function isBetterPorDocumentNumberExtraction(
-  baseValue: ReturnType<typeof sanitizePorExtraction>,
-  rescueValue: ReturnType<typeof sanitizePorExtraction>,
+function isBetterPorDocumentNumberExtraction<
+  TBase extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+  TRescue extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(
+  baseValue: TBase,
+  rescueValue: TRescue,
   {
     countryHint,
     documentTypeHint,
@@ -2483,19 +2657,24 @@ function isBetterPorDocumentNumberExtraction(
 }
 
 function mergePorDocumentNumberExtraction<
-  T extends {
+  TBase extends {
     document_number: string;
     local_document_number: string;
     document_number_confidence: number;
     warnings: string[];
   },
->(baseValue: T, rescueValue: T) {
+  TRescue extends {
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(baseValue: TBase, rescueValue: TRescue) {
   return {
     ...baseValue,
     document_number: rescueValue.document_number,
     local_document_number: rescueValue.local_document_number,
     document_number_confidence: rescueValue.document_number_confidence,
-    warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
+    warnings: uniqueStrings([...baseValue.warnings]),
   };
 }
 
@@ -2675,8 +2854,14 @@ function scorePoiDocumentNumberCandidate<
   );
 }
 
-function scorePorDocumentNumberCandidate(
-  value: ReturnType<typeof sanitizePorExtraction>,
+function scorePorDocumentNumberCandidate<
+  TValue extends {
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(
+  value: TValue,
   typeFingerprint: string,
   countryHint: string,
 ) {
