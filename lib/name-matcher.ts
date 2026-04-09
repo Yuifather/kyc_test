@@ -38,6 +38,19 @@ interface CandidateEvaluation {
 }
 
 const AMBIGUOUS_NOTE_MARKERS = [
+  "모호",
+  "불확실",
+  "불분명",
+  "애매",
+  "복수",
+  "여러",
+  "가능성",
+  "후보",
+  "수동 검토",
+  "판독 어려움",
+  "판단 어려움",
+  "읽기 후보",
+  "발음 후보",
   "ambiguous",
   "uncertain",
   "unclear",
@@ -394,7 +407,9 @@ function levenshteinDistance(left: string, right: string) {
 
 function isRomanizationAmbiguous(notes: string) {
   const normalized = normalizeLooseText(notes);
-  return AMBIGUOUS_NOTE_MARKERS.some((marker) => normalized.includes(marker));
+  return AMBIGUOUS_NOTE_MARKERS.some((marker) =>
+    normalized.includes(normalizeLooseText(marker)),
+  );
 }
 
 function resultConfidence(result: MatchResult, score: number, evidenceConfidence: number) {

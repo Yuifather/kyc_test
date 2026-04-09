@@ -355,21 +355,17 @@ export async function verifyPoiDocument({
       ) || "로컬 품질 점검 기준에서 추가 이미지 품질 이슈는 감지되지 않았습니다.",
     first_name: cleaned.first_name,
     local_first_name: cleaned.local_first_name,
-    local_first_name_furigana: cleaned.local_first_name_furigana,
     first_name_confidence: cleaned.first_name_confidence,
     local_first_name_confidence: cleaned.local_first_name_confidence,
     last_name: cleaned.last_name,
     local_last_name: cleaned.local_last_name,
-    local_last_name_furigana: cleaned.local_last_name_furigana,
     last_name_confidence: cleaned.last_name_confidence,
     local_last_name_confidence: cleaned.local_last_name_confidence,
     middle_name: cleaned.middle_name,
     local_middle_name: cleaned.local_middle_name,
-    local_middle_name_furigana: cleaned.local_middle_name_furigana,
     middle_name_confidence: cleaned.middle_name_confidence,
     local_middle_name_confidence: cleaned.local_middle_name_confidence,
     local_full_name: cleaned.local_full_name,
-    local_full_name_furigana: cleaned.local_full_name_furigana,
     local_full_name_confidence: cleaned.local_full_name_confidence,
     gender: gender.gender,
     local_gender: cleaned.local_gender,
@@ -858,21 +854,17 @@ function sanitizePoiExtraction(extraction: OpenAiPoiExtraction) {
     document_quality_notes: cleanText(extraction.document_quality_notes),
     first_name: cleanText(extraction.first_name),
     local_first_name: cleanText(extraction.local_first_name),
-    local_first_name_furigana: cleanText(extraction.local_first_name_furigana),
     first_name_confidence: clampConfidence(extraction.first_name_confidence),
     local_first_name_confidence: clampConfidence(extraction.local_first_name_confidence),
     last_name: cleanText(extraction.last_name),
     local_last_name: cleanText(extraction.local_last_name),
-    local_last_name_furigana: cleanText(extraction.local_last_name_furigana),
     last_name_confidence: clampConfidence(extraction.last_name_confidence),
     local_last_name_confidence: clampConfidence(extraction.local_last_name_confidence),
     middle_name: cleanText(extraction.middle_name),
     local_middle_name: cleanText(extraction.local_middle_name),
-    local_middle_name_furigana: cleanText(extraction.local_middle_name_furigana),
     middle_name_confidence: clampConfidence(extraction.middle_name_confidence),
     local_middle_name_confidence: clampConfidence(extraction.local_middle_name_confidence),
     local_full_name: cleanText(extraction.local_full_name),
-    local_full_name_furigana: cleanText(extraction.local_full_name_furigana),
     local_full_name_confidence: clampConfidence(extraction.local_full_name_confidence),
     gender: extraction.gender,
     local_gender: cleanText(extraction.local_gender),
@@ -1328,16 +1320,12 @@ function normalizeJapanesePoiExtraction<
   T extends {
     local_issued_country: string;
     local_first_name: string;
-    local_first_name_furigana: string;
     first_name_confidence: number;
     local_last_name: string;
-    local_last_name_furigana: string;
     last_name_confidence: number;
     local_middle_name: string;
-    local_middle_name_furigana: string;
     middle_name_confidence: number;
     local_full_name: string;
-    local_full_name_furigana: string;
     local_full_name_confidence: number;
   },
 >(value: T) {
@@ -1349,25 +1337,21 @@ function normalizeJapanesePoiExtraction<
 
   if (looksLikeJapaneseAddressField(nextValue.local_first_name)) {
     nextValue.local_first_name = "";
-    nextValue.local_first_name_furigana = "";
     nextValue.first_name_confidence = 0;
   }
 
   if (looksLikeJapaneseAddressField(nextValue.local_last_name)) {
     nextValue.local_last_name = "";
-    nextValue.local_last_name_furigana = "";
     nextValue.last_name_confidence = 0;
   }
 
   if (looksLikeJapaneseAddressField(nextValue.local_middle_name)) {
     nextValue.local_middle_name = "";
-    nextValue.local_middle_name_furigana = "";
     nextValue.middle_name_confidence = 0;
   }
 
   if (looksLikeJapaneseAddressField(nextValue.local_full_name)) {
     nextValue.local_full_name = "";
-    nextValue.local_full_name_furigana = "";
     nextValue.local_full_name_confidence = 0;
   }
 
@@ -1452,21 +1436,17 @@ function mergePoiNameExtraction<
   T extends {
     first_name: string;
     local_first_name: string;
-    local_first_name_furigana: string;
     first_name_confidence: number;
     local_first_name_confidence: number;
     last_name: string;
     local_last_name: string;
-    local_last_name_furigana: string;
     last_name_confidence: number;
     local_last_name_confidence: number;
     middle_name: string;
     local_middle_name: string;
-    local_middle_name_furigana: string;
     middle_name_confidence: number;
     local_middle_name_confidence: number;
     local_full_name: string;
-    local_full_name_furigana: string;
     local_full_name_confidence: number;
     romanization_primary_full_name: string;
     romanization_alternatives: string[];
@@ -1479,21 +1459,17 @@ function mergePoiNameExtraction<
     ...baseValue,
     first_name: rescueValue.first_name,
     local_first_name: rescueValue.local_first_name,
-    local_first_name_furigana: rescueValue.local_first_name_furigana,
     first_name_confidence: rescueValue.first_name_confidence,
     local_first_name_confidence: rescueValue.local_first_name_confidence,
     last_name: rescueValue.last_name,
     local_last_name: rescueValue.local_last_name,
-    local_last_name_furigana: rescueValue.local_last_name_furigana,
     last_name_confidence: rescueValue.last_name_confidence,
     local_last_name_confidence: rescueValue.local_last_name_confidence,
     middle_name: rescueValue.middle_name,
     local_middle_name: rescueValue.local_middle_name,
-    local_middle_name_furigana: rescueValue.local_middle_name_furigana,
     middle_name_confidence: rescueValue.middle_name_confidence,
     local_middle_name_confidence: rescueValue.local_middle_name_confidence,
     local_full_name: rescueValue.local_full_name,
-    local_full_name_furigana: rescueValue.local_full_name_furigana,
     local_full_name_confidence: rescueValue.local_full_name_confidence,
     romanization_primary_full_name: rescueValue.romanization_primary_full_name,
     romanization_alternatives: rescueValue.romanization_alternatives,
@@ -1655,39 +1631,26 @@ function parseJapaneseRecipientAddress({
 
 function preferOriginalLocalPoiNameScripts<T extends {
   local_first_name: string;
-  local_first_name_furigana: string;
   local_last_name: string;
-  local_last_name_furigana: string;
   local_middle_name: string;
-  local_middle_name_furigana: string;
   local_full_name: string;
-  local_full_name_furigana: string;
 }>(value: T) {
   const nextValue = { ...value };
   const fullName = cleanText(nextValue.local_full_name);
   const splitFullName = splitLocalFullName(fullName);
   const fullNameHasHan = containsHanScript(fullName);
 
-  if (fullNameHasHan && isKanaOnly(nextValue.local_last_name) && !nextValue.local_last_name_furigana) {
+  if (fullNameHasHan && isKanaOnly(nextValue.local_last_name)) {
     nextValue.local_last_name = splitFullName.lastName || "";
-    nextValue.local_last_name_furigana = "";
   }
 
-  if (fullNameHasHan && isKanaOnly(nextValue.local_first_name) && !nextValue.local_first_name_furigana) {
+  if (fullNameHasHan && isKanaOnly(nextValue.local_first_name)) {
     nextValue.local_first_name = splitFullName.firstName || "";
-    nextValue.local_first_name_furigana = "";
   }
 
-  if (
-    fullNameHasHan &&
-    isKanaOnly(nextValue.local_middle_name) &&
-    !nextValue.local_middle_name_furigana
-  ) {
+  if (fullNameHasHan && isKanaOnly(nextValue.local_middle_name)) {
     nextValue.local_middle_name = "";
-    nextValue.local_middle_name_furigana = "";
   }
-
-  nextValue.local_full_name_furigana = "";
 
   return nextValue;
 }

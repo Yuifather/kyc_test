@@ -409,41 +409,27 @@ function derivePoiNameConsistency(
 }
 
 function buildStatusReasons(result: VerificationResult) {
-  return result.kind === "poi"
-    ? buildPoiStatusReasons(result)
-    : buildPorStatusReasons(result);
-}
+  const warnings = result.warnings
+    .map((warning) => warning.trim())
+    .filter(Boolean);
 
-function buildPoiStatusReasons(result: PoiVerificationResult) {
-  if (result.review_status === "검토") {
-    return [buildPoiReviewSummary()];
+  if (warnings.length) {
+    return warnings;
   }
 
   if (result.review_status === "불가") {
-    return ["문서로 보기 어렵거나 이름 정보가 확인되지 않아 사람이 확인해야 합니다."];
+    return result.kind === "poi"
+      ? ["문서에서 이름 정보를 확인할 수 없어 사람이 확인해야 합니다."]
+      : ["문서에서 주소 정보를 확인할 수 없어 사람이 확인해야 합니다."];
   }
 
-  return [];
-}
-
-function buildPorStatusReasons(result: PorVerificationResult) {
   if (result.review_status === "검토") {
-    return [buildPorReviewSummary()];
-  }
-
-  if (result.review_status === "불가") {
-    return ["문서로 보기 어렵거나 주소 정보가 확인되지 않아 사람이 확인해야 합니다."];
+    return result.kind === "poi"
+      ? ["OCR 정합도 또는 이름 로마자 판독이 불확실해 수동 검토가 필요합니다."]
+      : ["OCR 정합도 또는 주소 분리가 불확실해 수동 검토가 필요합니다."];
   }
 
   return [];
-}
-
-function buildPoiReviewSummary() {
-  return "이름 겹침은 크지만 영문화 표기가 다소 모호하다.";
-}
-
-function buildPorReviewSummary() {
-  return "주소는 보이지만 OCR 표기가 다소 모호하다.";
 }
 
 function getDisplayedNameOcrConfidence(
