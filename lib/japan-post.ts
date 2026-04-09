@@ -1,4 +1,4 @@
-import { strFromU8, unzipSync } from "fflate";
+﻿import { strFromU8, unzipSync } from "fflate";
 
 import type { PostalCodeSource } from "@/types/verification";
 
@@ -203,6 +203,11 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
     const strippedAddress1 = stripJapaneseTownPrefixV2(address1);
     if (strippedAddress1) {
       candidates.add(strippedAddress1);
+
+      const splitAtAza = strippedAddress1.replace(/^(.+?)字.+$/u, "$1");
+      if (splitAtAza && splitAtAza !== strippedAddress1) {
+        candidates.add(splitAtAza);
+      }
     }
   }
 
@@ -229,13 +234,12 @@ function buildTownCandidates(localAddress1: string, localAddress2: string) {
   return Array.from(candidates);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function stripJapaneseTownPrefix(value: string) {
-  return value.replace(/^(大字|字|小字)/u, "");
+  return normalizeJapaneseLookupText(value).replace(/^(?:大字|字|小字|字之下|字ノ下)/u, "");
 }
 
 function stripJapaneseTownPrefixV2(value: string) {
-  return value.replace(/^(大字|字|小字)/u, "");
+  return stripJapaneseTownPrefix(value);
 }
 
 function extractLeadingTown(address2: string) {
@@ -325,3 +329,4 @@ function toJapaneseNumeral(value: number) {
 
   return String(value);
 }
+

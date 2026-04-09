@@ -1,4 +1,4 @@
-import { clampConfidence } from "@/lib/confidence";
+﻿import { clampConfidence } from "@/lib/confidence";
 import {
   joinNameParts,
   normalizeLooseText,
@@ -39,18 +39,16 @@ interface CandidateEvaluation {
 
 const AMBIGUOUS_NOTE_MARKERS = [
   "모호",
-  "불확실",
   "불분명",
   "애매",
-  "복수",
-  "여러",
-  "가능성",
-  "후보",
   "수동 검토",
+  "복수 가능성",
+  "읽기 어려움",
   "판독 어려움",
-  "판단 어려움",
-  "읽기 후보",
-  "발음 후보",
+  "흐림",
+  "흐릿",
+  "확정 불가",
+  "추정",
   "ambiguous",
   "uncertain",
   "unclear",
@@ -85,7 +83,7 @@ export function matchRomanizedName({
     return {
       result: "manual_review",
       confidence: clampConfidence((evidenceConfidence + documentQualityConfidence) / 2),
-      reason: "추출된 영문화 이름이 불완전하여 수동 검토가 권장됩니다.",
+      reason: "입력값으로부터 신뢰할 수 있는 정규화 이름을 만들지 못했습니다.",
       matchedValue: "",
       score: 0,
     };
@@ -103,13 +101,11 @@ export function matchRomanizedName({
     }
   }
 
-  if (
-    user.sortedTokens.join(" ") === bestCandidate.normalized.sortedTokens.join(" ")
-  ) {
+  if (user.sortedTokens.join(" ") === bestCandidate.normalized.sortedTokens.join(" ")) {
     bestEvaluation = {
       result: "exact_match",
       score: Math.max(bestEvaluation.score, 0.98),
-      reason: "사용자 입력값과 이름 토큰이 모두 일치합니다.",
+      reason: "사용자 입력값과 정규화 이름의 토큰 구성이 모두 일치합니다.",
     };
   }
 
@@ -226,7 +222,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "manual_review",
       score: 0,
-      reason: "입력값으로부터 신뢰할 수 있는 정규화 이름을 만들지 못했습니다.",
+      reason: "입력값 또는 후보 이름을 신뢰할 수 있는 형태로 만들지 못했습니다.",
     };
   }
 
@@ -235,17 +231,15 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
       return {
         result: "likely_match",
         score: 0.93,
-        reason: "성/이름 순서를 바꿨을 때 일치했습니다.",
+        reason: "성/이름 순서만 다르지만 이름 토큰은 일치합니다.",
       };
     }
 
-    if (
-      candidate.source === "component_no_middle"
-    ) {
+    if (candidate.source === "component_no_middle") {
       return {
         result: "likely_match",
         score: 0.85,
-        reason: "입력값에는 Middle name이 없지만 First name과 Last name은 일치합니다.",
+        reason: "Middle name이 없어도 First name과 Last name은 일치합니다.",
       };
     }
 
@@ -268,7 +262,7 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     return {
       result: "likely_match",
       score: 0.89,
-      reason: "띄어쓰기 또는 순서 차이만 있고 이름 토큰은 동일합니다.",
+      reason: "띄어쓰기 차이 또는 순서 차이만 있고 이름 토큰은 동일합니다.",
     };
   }
 
@@ -310,8 +304,8 @@ function evaluateCandidate(user: NormalizedName, candidate: CandidateName): Cand
     result: "mismatch",
     score,
     reason: surnameMismatch
-      ? "성이 추출된 이름과 실질적으로 다릅니다."
-      : "추출된 영문화 이름이 사용자 입력값과 충분히 가깝게 맞지 않습니다.",
+      ? "성 쪽 토큰이 맞지 않아 이름 정합도가 낮습니다."
+      : "추출된 이름과 사용자 입력 이름이 충분히 일치하지 않습니다.",
   };
 }
 

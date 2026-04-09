@@ -21,10 +21,7 @@ export type PostalCodeSource = "ocr" | "lookup" | "none";
 
 export type DocumentIntegrityStatus = "clean" | "suspected" | "tampered";
 
-export type ReviewStatus =
-  | "불가"
-  | "검토"
-  | "정상";
+export type ReviewStatus = "불가" | "검토" | "정상";
 
 export interface NameMatchEvaluation {
   result: MatchResult;
@@ -111,6 +108,30 @@ export interface PoiVerificationResult extends BaseVerificationResult {
 
 export interface PorVerificationResult extends BaseVerificationResult {
   kind: "por";
+  user_input_english_name: string;
+  first_name: string;
+  local_first_name: string;
+  first_name_confidence: number;
+  local_first_name_confidence: number;
+  last_name: string;
+  local_last_name: string;
+  last_name_confidence: number;
+  local_last_name_confidence: number;
+  middle_name: string;
+  local_middle_name: string;
+  middle_name_confidence: number;
+  local_middle_name_confidence: number;
+  local_full_name: string;
+  local_full_name_confidence: number;
+  romanization_primary_full_name: string;
+  romanization_alternatives: string[];
+  romanization_notes: string;
+  first_name_romanization_candidates: string[];
+  middle_name_romanization_candidates: string[];
+  last_name_romanization_candidates: string[];
+  name_match_result: MatchResult;
+  name_match_confidence: number;
+  name_match_reason: string;
   country: string;
   local_country: string;
   country_confidence: number;

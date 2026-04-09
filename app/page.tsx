@@ -87,6 +87,7 @@ export default function Home() {
   const [backPreviewUrl, setBackPreviewUrl] = useState("");
 
   const [porIssuedCountry, setPorIssuedCountry] = useState("");
+  const [porEnglishName, setPorEnglishName] = useState("");
   const [porDocumentType, setPorDocumentType] = useState("");
   const [porDocumentFile, setPorDocumentFile] = useState<File | null>(null);
   const [porPreviewUrl, setPorPreviewUrl] = useState("");
@@ -161,6 +162,11 @@ export default function Home() {
       return;
     }
 
+    if (!porEnglishName.trim()) {
+      setErrorMessage("POR 영문 성명을 입력해주세요.");
+      return;
+    }
+
     if (!porDocumentType) {
       setErrorMessage("Document type을 선택해주세요.");
       return;
@@ -183,6 +189,7 @@ export default function Home() {
       buildFormData: () => {
         const formData = new FormData();
         formData.append("verificationKind", "por");
+        formData.append("englishName", porEnglishName.trim());
         formData.append("documentTypeHint", porDocumentType);
         formData.append("countryHint", canonicalIssuedCountry);
         formData.append("documentImage", porDocumentFile);
@@ -309,9 +316,11 @@ export default function Home() {
                 />
               ) : (
                 <PorForm
+                  englishName={porEnglishName}
                   issuedCountry={porIssuedCountry}
                   documentType={porDocumentType}
                   documentFile={porDocumentFile}
+                  onEnglishNameChange={setPorEnglishName}
                   onIssuedCountryChange={setPorIssuedCountry}
                   onDocumentTypeChange={setPorDocumentType}
                   onDocumentFileChange={(file) =>
@@ -476,22 +485,39 @@ function PoiForm({
 }
 
 function PorForm({
+  englishName,
   issuedCountry,
   documentType,
   documentFile,
+  onEnglishNameChange,
   onIssuedCountryChange,
   onDocumentTypeChange,
   onDocumentFileChange,
 }: {
+  englishName: string;
   issuedCountry: string;
   documentType: string;
   documentFile: File | null;
+  onEnglishNameChange: (value: string) => void;
   onIssuedCountryChange: (value: string) => void;
   onDocumentTypeChange: (value: string) => void;
   onDocumentFileChange: (file: File | null) => void;
 }) {
   return (
     <div className="grid gap-6 md:grid-cols-2">
+      <FormField
+        label="Customer English Full Name"
+        description="필수 항목입니다. POR 이름 판독과 이름 정합도 계산에 사용됩니다."
+      >
+        <input
+          value={englishName}
+          onChange={(event) => onEnglishNameChange(event.target.value)}
+          placeholder="Giljung Kim"
+          className={inputClassName}
+          autoComplete="off"
+        />
+      </FormField>
+
       <FormField
         label="Document type"
         description="필수 항목입니다. 주소지 증명에 해당하는 POR Document type을 선택하세요."

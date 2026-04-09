@@ -1,5 +1,4 @@
 ﻿import { zodTextFormat } from "openai/helpers/zod";
-import sharp from "sharp";
 
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
 import { resolveGenderExtraction } from "@/lib/gender-extraction";
@@ -16,6 +15,7 @@ import {
 } from "@/lib/openai-schema";
 import type {
   DocumentIntegrityStatus,
+  MatchResult,
   PoiVerificationResult,
   PorVerificationResult,
   ReviewStatus,
@@ -56,7 +56,7 @@ function isJapaneseCountryHint(value: string) {
 
 function buildPoiSystemPrompt(
   countryHint: string,
-  mode: "default" | "name_rescue",
+  mode: "default" | "name_rescue" | "document_number_rescue",
 ) {
   const sections = [GLOBAL_POI_SYSTEM_PROMPT];
 
@@ -70,12 +70,18 @@ function buildPoiSystemPrompt(
     );
   }
 
+  if (mode === "document_number_rescue") {
+    sections.push(
+      "Document-number rescue mode: focus on the explicit document number only. Prefer the document-type-specific side and ignore unrelated serials, phone numbers, postal codes, dates, barcodes, and decorative numbers.",
+    );
+  }
+
   return sections.join("\n\n");
 }
 
 function buildPorSystemPrompt(
   countryHint: string,
-  mode: "default" | "address_rescue",
+  mode: "default" | "address_rescue" | "document_number_rescue",
 ) {
   const sections = [GLOBAL_POR_SYSTEM_PROMPT];
 
@@ -86,6 +92,12 @@ function buildPorSystemPrompt(
   if (mode === "address_rescue") {
     sections.push(
       "Address rescue mode: focus on the recipient residence address, recover the best split for state, city, address_1, address_2, and postal_code, and ignore sender or issuer addresses.",
+    );
+  }
+
+  if (mode === "document_number_rescue") {
+    sections.push(
+      "Document-number rescue mode: focus only on the explicit account, customer, reference, contract, or document number field. Do not use phone numbers, postal codes, dates, amounts, barcode payloads, or address digits as document_number.",
     );
   }
 
@@ -101,6 +113,7 @@ interface VerifyPoiInput {
 }
 
 interface VerifyPorInput {
+  englishName: string;
   countryHint: string;
   documentTypeHint: string;
   documentFile: File;
@@ -124,6 +137,9 @@ Rules:
 - Do not mark a document tampered merely because the required name is missing, hidden, covered, cropped, or unreadable.
 - Do not mark a document tampered merely because optional fields are hidden, blank, or obscured.
 - Treat screenshots, screen captures, digitally generated mockups, photo-edit composites, printed-and-rephotographed copies, and other non-camera captures of the physical document as tampered.
+- Only treat a genuine camera photo of the physical document as clean. If the image is clearly a scan, screenshot, screen capture, printed copy, or digital composite, mark it tampered even when the text is readable.
+- If you cannot clearly tell that the image is a real camera photo of a physical document, do not mark it clean. Prefer suspected or tampered.
+- A clean white-background card graphic, layout mockup, synthetic render, or neatly composited ID image is not a clean camera photo. Mark it suspected or tampered unless it clearly shows real-world camera capture cues from a physical card.
 - If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
 - Write document_integrity_notes in Korean when the status is suspected or tampered.
 - first_name, last_name, middle_name, document_type, issued_country, nationality, and place_of_birth must be standardized values.
@@ -148,6 +164,9 @@ Rules:
 - Extract person-name fields from the front side only.
 - If the front side does not show a readable person name, leave first_name, last_name, middle_name, and local_full_name blank.
 - Use the back side only for supplementary non-name fields that may appear there.
+- For Japanese driver's licenses, the document number is typically on the front side.
+- For Japanese My Number Cards / Individual Number Cards, the document number is typically on the back side.
+- For Japanese My Number Cards / Individual Number Cards, document_number means the 12-digit 個人番号. Search the back side carefully and prefer the 12-digit number shown in grouped boxes.
 - Never output placeholder, example, or stereotyped names. If the actual name is unclear, leave the name fields blank instead of inventing a common name.
 - If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
 - Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
@@ -155,6 +174,9 @@ Rules:
 const JAPANESE_POI_SYSTEM_PROMPT = `Japanese POI-specific rules:
 - For Japanese identity documents, read the personal name only from the field labeled \u6c0f\u540d on the front side.
 - For Japanese driver's licenses and ID cards, do not use text from the \u4f4f\u6240 field or any address block for name fields.
+- For Japanese driver's licenses, the document number is usually on the front side.
+- For Japanese My Number Cards / Individual Number Cards, the document number is usually on the back side.
+- For Japanese My Number Cards / Individual Number Cards, document_number means the 12-digit 個人番号 on the back side. Ignore short front-side serials, certificate dates, municipality lines, and auxiliary numbers.
 - If the image is rotated or the name field is vertical, mentally rotate it and read the \u6c0f\u540d field before extracting names.
 - If a Japanese local-script name is visible as surname followed by given name, keep that exact local order in local_full_name and split local_last_name/local_first_name accordingly.
 - For Japanese documents, local_issued_country should be \u65e5\u672c when the issuing country is Japan. Do not put a prefecture into local_issued_country.
@@ -181,6 +203,9 @@ Rules:
 - date_of_expiry must be normalized to YYYY-MM-DD when confident, otherwise "".
 - postal_code must only be returned when it is explicitly visible on the document. Never infer or guess it from the address.
 - local_full_address should preserve the original OCR address string when visible.
+- If a recipient/addressee name is visible, extract first_name, last_name, middle_name, local_first_name, local_last_name, local_middle_name, local_full_name, romanization_primary_full_name, romanization_alternatives, and the field-specific romanization candidate arrays using the same POI-style rules.
+- Keep standardized name fields in Latin script and local name fields in the original OCR script.
+- Never use sender, issuer, office, or footer names for the recipient name fields.
 - address_notes should explain any segmentation ambiguity.
 - Write explanatory text fields such as document_quality_notes, address_notes, and warnings in Korean.
 - Assess document integrity separately from OCR quality.
@@ -190,13 +215,18 @@ Rules:
 - Do not mark a document tampered merely because the recipient address is missing, hidden, covered, cropped, or unreadable.
 - Do not mark a document tampered merely because sender, issuer, office, footer, contact, or return-address fields are hidden, blank, or obscured.
 - Treat screenshots, screen captures, digitally generated mockups, photo-edit composites, printed-and-rephotographed copies, and other non-camera captures of the physical document as tampered.
+- A clean synthetic layout, flat digital bill render, or neatly composited page that does not look like a camera photo of paper should not be marked clean.
 - If the image is rotated, skewed, or partially cropped but otherwise looks genuine, keep document_integrity_status clean unless there are separate edit artifacts.
+- If you cannot clearly tell that the image is a real camera photo of a physical document, do not mark it clean. Prefer suspected or tampered.
 - Write document_integrity_notes in Korean when the status is suspected or tampered.
 - Keep normalized data values such as document_type, issued_country, country/state/city/address fields, and dates in their required output format.
 - When multiple addresses are visible, always choose the recipient/addressee residence address for POR.
 - Ignore sender, issuer, office, branch, footer, contact, or return addresses unless they are clearly the recipient address.
 - On mailed notices, bills, giro slips, or utility documents, prefer the address block directly associated with the recipient name, often located above the recipient name and honorific.
+- On mailed notices, bills, giro slips, and utility documents, select the recipient/addressee block that contains the recipient name and recipient residence address. Ignore issuer headquarters, remittance instructions, payment tables, and company contact blocks.
 - local_full_address must contain only the selected recipient/addressee address block, not a concatenation of recipient and sender addresses.
+- document_number may appear elsewhere on the page, outside the recipient block. Search the full document for an explicit number label or dedicated number field, and never force document_number to come from the recipient address block.
+- On utility bills or giro slips, document_number must come from an explicit customer/account/reference field. Never use a phone number, postal code, date, amount, barcode payload, or issuer contact number as document_number.
 - Only set manual_review_required to true when image quality or address/document evidence is too weak for reliable verification.
 - If the document is blurry, cropped, reflective, occluded, or too small, lower document_quality_confidence and explain it in document_quality_notes.
 - Do not lower document_quality_confidence only because the image is rotated sideways if the text is still readable.`;
@@ -213,9 +243,13 @@ const JAPANESE_POR_SYSTEM_PROMPT = `Japanese POR-specific rules:
   - Example: "上益城郡益城町安永529" should be split as country JAPAN, state KUMAMOTO, city KAMIMASHIKI-GUN, address_1 MASHIKI-MACHI, address_2 YASUNAGA 529, postal_code 861-2231.
   - Example: "青森県青森市大字三内字沢部426番地17" should be split as country JAPAN, state AOMORI-KEN, city AOMORI-SHI, address_1 OAZA SANNAI, address_2 AZA SAWABE 426-17, postal_code 038-0031.
   - When the local recipient address is "郡上市八幡町美山2455番地1", local_city must be "郡上市" and local_address_1 must be "八幡町美山". Do not split it as "郡" plus "上市八幡町美山".
-  - When the local recipient address contains 大字 and 字, split them across address_1 and address_2 instead of mixing them into city.
-  - Keep state as prefecture with suffixes such as -KEN, -TO, -DO, or -FU when appropriate.
-  - Keep city as city/ward/district with suffixes such as -SHI, -KU, or -GUN when appropriate.
+- When the local recipient address contains 大字 and 字, split them across address_1 and address_2 instead of mixing them into city.
+- Keep state as prefecture with suffixes such as -KEN, -TO, -DO, or -FU when appropriate.
+- Keep city as city/ward/district with suffixes such as -SHI, -KU, or -GUN when appropriate.
+- If a recipient name is visible on a Japanese POR document, extract it with the same field rules as POI: standardized fields in Latin script, local fields in the original OCR script, and candidate romanizations for comparison.
+- For Japanese giro slips, utility notices, and bills, the recipient/addressee name and residence address come from the recipient block, while document_number may be elsewhere on the page. Search the full page for an explicit number label or dedicated field and do not limit document_number to the recipient block.
+- For Japanese utility bills, giro slips, statements, and mailed notices, the recipient block usually contains the postal code, recipient address, recipient name, and honorific. Prefer that block over issuer tables and payment summaries.
+- For Japanese identity documents used as POR, such as My Number cards, residence cards, driver's licenses, and residence certificates, extract the address strictly from the field labeled 住所 or its immediate address line.
 - The application will use postal-code lookup when postal_code is not visible, so do not invent postal codes.`;
 
 export async function verifyPoiDocument({
@@ -253,14 +287,30 @@ export async function verifyPoiDocument({
     backBuffer,
   });
 
-  let cleaned = sanitizePoiExtraction(extraction);
-
-  if (shouldRunJapanesePoiNameRescue({
+  let cleaned = normalizePoiDocumentNumberForType(sanitizePoiExtraction(extraction), {
     countryHint,
     documentTypeHint,
-    issuedCountry: cleaned.issued_country,
-    localIssuedCountry: cleaned.local_issued_country,
-  })) {
+  });
+
+  if (
+    shouldRunJapanesePoiNameRescue({
+      countryHint,
+      documentTypeHint,
+      issuedCountry: cleaned.issued_country,
+      localIssuedCountry: cleaned.local_issued_country,
+      firstName: cleaned.first_name,
+      firstNameConfidence: cleaned.first_name_confidence,
+      localFirstName: cleaned.local_first_name,
+      localFirstNameConfidence: cleaned.local_first_name_confidence,
+      lastName: cleaned.last_name,
+      lastNameConfidence: cleaned.last_name_confidence,
+      localLastName: cleaned.local_last_name,
+      localLastNameConfidence: cleaned.local_last_name_confidence,
+      localFullName: cleaned.local_full_name,
+      localFullNameConfidence: cleaned.local_full_name_confidence,
+      romanizationPrimaryFullName: cleaned.romanization_primary_full_name,
+    })
+  ) {
     const nameRescueExtraction = await extractPoiWithOpenAI({
       englishName,
       countryHint,
@@ -269,12 +319,54 @@ export async function verifyPoiDocument({
       frontBuffer,
       mode: "name_rescue",
     });
-    const nameRescueCleaned = sanitizePoiExtraction(nameRescueExtraction);
+    const nameRescueCleaned = normalizePoiDocumentNumberForType(
+      sanitizePoiExtraction(nameRescueExtraction),
+      {
+        countryHint,
+        documentTypeHint,
+      },
+    );
 
     if (hasPoiNameEvidence(nameRescueCleaned)) {
       cleaned = mergePoiNameExtraction(cleaned, nameRescueCleaned);
     }
   }
+
+  if (
+    shouldRunPoiDocumentNumberRescue({
+      countryHint,
+      documentTypeHint,
+      detectedDocumentType: cleaned.document_type,
+      localDocumentType: cleaned.local_document_type,
+      backProvided: Boolean(backFile && backBuffer),
+      documentNumber: cleaned.document_number,
+      localDocumentNumber: cleaned.local_document_number,
+      documentNumberConfidence: cleaned.document_number_confidence,
+    })
+  ) {
+    const documentNumberRescueExtraction = await extractPoiWithOpenAI({
+      englishName,
+      countryHint,
+      documentTypeHint,
+      frontFile,
+      backFile,
+      frontBuffer,
+      backBuffer,
+      mode: "document_number_rescue",
+    });
+    const documentNumberRescueCleaned = normalizePoiDocumentNumberForType(
+      sanitizePoiExtraction(documentNumberRescueExtraction),
+      {
+        countryHint,
+        documentTypeHint,
+      },
+    );
+
+    if (isBetterPoiDocumentNumberExtraction(cleaned, documentNumberRescueCleaned)) {
+      cleaned = mergePoiDocumentNumberExtraction(cleaned, documentNumberRescueCleaned);
+    }
+  }
+
   const gender = resolveGenderExtraction({
     countryDetected: cleaned.issued_country,
     gender: cleaned.gender,
@@ -327,7 +419,6 @@ export async function verifyPoiDocument({
     averageConfidence([
       cleaned.overall_confidence,
       documentQualityConfidence,
-      nameMatch.confidence,
       cleaned.document_type_confidence,
       cleaned.issued_country_confidence,
       cleaned.document_number_confidence,
@@ -360,8 +451,8 @@ export async function verifyPoiDocument({
     localFullNameConfidence: cleaned.local_full_name_confidence,
   });
 
-  return {
-    kind: "poi",
+  const result = {
+    kind: "poi" as const,
     review_status: reviewStatus,
     user_input_english_name: englishName.trim(),
     document_type: cleaned.document_type || documentTypeHint.trim(),
@@ -425,37 +516,87 @@ export async function verifyPoiDocument({
     manual_review_required: manualReviewRequired,
     warnings,
   };
+
+  return result;
 }
 
 export async function verifyPorDocument({
+  englishName,
   countryHint,
   documentTypeHint,
   documentFile,
 }: VerifyPorInput): Promise<PorVerificationResult> {
-  validatePorInputs({ countryHint, documentTypeHint, documentFile });
+  validatePorInputs({ englishName, countryHint, documentTypeHint, documentFile });
 
   const buffer = Buffer.from(await documentFile.arrayBuffer());
   const localImageQuality = inspectImageQuality(buffer, documentFile.size);
   const extraction = await extractPorWithOpenAI({
+    englishName,
     countryHint,
     documentTypeHint,
     documentFile,
     buffer,
   });
-  let cleaned = sanitizePorExtraction(extraction);
+  let cleaned = normalizePorDocumentNumberForType(sanitizePorExtraction(extraction), {
+    countryHint,
+    documentTypeHint,
+  });
 
   if (shouldRetryPorAddressExtraction(cleaned, { countryHint, documentTypeHint })) {
     const retryExtraction = await extractPorWithOpenAI({
+      englishName,
       countryHint,
       documentTypeHint,
       documentFile,
       buffer,
       mode: "address_rescue",
     });
-    const retryCleaned = sanitizePorExtraction(retryExtraction);
+    const retryCleaned = normalizePorDocumentNumberForType(
+      sanitizePorExtraction(retryExtraction),
+      {
+        countryHint,
+        documentTypeHint,
+      },
+    );
+    const [currentAddressScore, retryAddressScore] = await Promise.all([
+      scorePorAddressCandidate(cleaned, { countryHint, documentTypeHint }),
+      scorePorAddressCandidate(retryCleaned, { countryHint, documentTypeHint }),
+    ]);
 
-    if (getPorAddressExtractionScore(retryCleaned) > getPorAddressExtractionScore(cleaned)) {
+    if (retryAddressScore > currentAddressScore) {
       cleaned = retryCleaned;
+    }
+  }
+
+  if (
+    shouldRunPorDocumentNumberRescue(cleaned, {
+      countryHint,
+      documentTypeHint,
+    })
+  ) {
+    const documentNumberRescueExtraction = await extractPorWithOpenAI({
+      englishName,
+      countryHint,
+      documentTypeHint,
+      documentFile,
+      buffer,
+      mode: "document_number_rescue",
+    });
+    const documentNumberRescueCleaned = normalizePorDocumentNumberForType(
+      sanitizePorExtraction(documentNumberRescueExtraction),
+      {
+        countryHint,
+        documentTypeHint,
+      },
+    );
+
+    if (
+      isBetterPorDocumentNumberExtraction(cleaned, documentNumberRescueCleaned, {
+        countryHint,
+        documentTypeHint,
+      })
+    ) {
+      cleaned = mergePorDocumentNumberExtraction(cleaned, documentNumberRescueCleaned);
     }
   }
 
@@ -464,6 +605,28 @@ export async function verifyPorDocument({
     localImageQuality.confidence,
     localImageQuality.notes.length > 0,
   );
+
+  const nameEvidenceConfidence = averageConfidence([
+    cleaned.first_name_confidence,
+    cleaned.last_name_confidence,
+    cleaned.middle_name ? cleaned.middle_name_confidence : undefined,
+    cleaned.overall_confidence,
+    documentQualityConfidence,
+  ]);
+
+  const nameMatch = matchRomanizedName({
+    userInput: englishName,
+    primaryRomanization: cleaned.romanization_primary_full_name,
+    alternativeRomanizations: cleaned.romanization_alternatives,
+    firstName: cleaned.first_name,
+    middleName: cleaned.middle_name,
+    lastName: cleaned.last_name,
+    evidenceConfidence: nameEvidenceConfidence,
+    documentQualityConfidence,
+    romanizationNotes: [cleaned.romanization_notes, cleaned.document_quality_notes]
+      .filter(Boolean)
+      .join(" "),
+  });
 
   const postalLookup =
     !cleaned.postal_code || cleaned.postal_code_confidence < 0.55
@@ -494,7 +657,33 @@ export async function verifyPorDocument({
       documentQualityConfidence,
       postalLookupWarning: postalLookup.warning ?? "",
       hasPostalCode: Boolean(finalPostalCode),
+      nameMatchRequiresReview:
+        nameMatch.result === "manual_review" ||
+        nameMatch.result === "possible_match" ||
+        nameMatch.result === "mismatch" ||
+        nameMatch.confidence < 0.78 ||
+        hasLowConfidencePresentField(
+          [
+            { value: cleaned.first_name || cleaned.local_first_name, confidence: cleaned.first_name_confidence || cleaned.local_first_name_confidence },
+            { value: cleaned.last_name || cleaned.local_last_name, confidence: cleaned.last_name_confidence || cleaned.local_last_name_confidence },
+            { value: cleaned.middle_name || cleaned.local_middle_name, confidence: cleaned.middle_name_confidence || cleaned.local_middle_name_confidence },
+          ],
+          0.55,
+        ),
+      hasVisibleNameEvidence: Boolean(
+        cleaned.local_full_name ||
+          cleaned.local_first_name ||
+          cleaned.local_last_name ||
+          cleaned.first_name ||
+          cleaned.last_name,
+      ),
     }),
+    ...(nameMatch.result === "manual_review" ||
+    nameMatch.result === "possible_match" ||
+    nameMatch.result === "mismatch" ||
+    nameMatch.confidence < 0.78
+      ? [nameMatch.reason]
+      : []),
   ]);
 
   const overallConfidence = clampConfidence(
@@ -510,7 +699,10 @@ export async function verifyPorDocument({
       cleaned.city_confidence,
       cleaned.address_1_confidence,
       cleaned.address_2_confidence,
-      finalPostalCodeConfidence,
+      cleaned.postal_code ? finalPostalCodeConfidence : 0,
+      cleaned.first_name_confidence,
+      cleaned.last_name_confidence,
+      cleaned.middle_name_confidence,
     ]),
   );
   const manualReviewRequired =
@@ -520,7 +712,19 @@ export async function verifyPorDocument({
     !cleaned.country ||
     !cleaned.state ||
     !cleaned.city ||
-    !cleaned.address_1;
+    !cleaned.address_1 ||
+    nameMatch.result === "manual_review" ||
+    nameMatch.result === "possible_match" ||
+    nameMatch.result === "mismatch" ||
+    nameMatch.confidence < 0.78 ||
+    hasLowConfidencePresentField(
+      [
+        { value: cleaned.first_name || cleaned.local_first_name, confidence: cleaned.first_name_confidence || cleaned.local_first_name_confidence },
+        { value: cleaned.last_name || cleaned.local_last_name, confidence: cleaned.last_name_confidence || cleaned.local_last_name_confidence },
+        { value: cleaned.middle_name || cleaned.local_middle_name, confidence: cleaned.middle_name_confidence || cleaned.local_middle_name_confidence },
+      ],
+      0.55,
+    );
   const reviewStatus = derivePorReviewStatus({
     manualReviewRequired,
     documentIntegrityStatus: cleaned.document_integrity_status,
@@ -543,11 +747,28 @@ export async function verifyPorDocument({
     postalCodeConfidence: finalPostalCodeConfidence,
     localFullAddress: cleaned.local_full_address,
     postalCodeSource: cleaned.postal_code ? "ocr" : postalLookup.source,
+    nameMatchResult: nameMatch.result,
+    nameMatchConfidence: nameMatch.confidence,
+    firstName: cleaned.first_name,
+    localFirstName: cleaned.local_first_name,
+    firstNameConfidence: cleaned.first_name_confidence,
+    localFirstNameConfidence: cleaned.local_first_name_confidence,
+    lastName: cleaned.last_name,
+    localLastName: cleaned.local_last_name,
+    lastNameConfidence: cleaned.last_name_confidence,
+    localLastNameConfidence: cleaned.local_last_name_confidence,
+    middleName: cleaned.middle_name,
+    localMiddleName: cleaned.local_middle_name,
+    middleNameConfidence: cleaned.middle_name_confidence,
+    localMiddleNameConfidence: cleaned.local_middle_name_confidence,
+    localFullName: cleaned.local_full_name,
+    localFullNameConfidence: cleaned.local_full_name_confidence,
   });
 
   return {
     kind: "por",
     review_status: reviewStatus,
+    user_input_english_name: englishName.trim(),
     document_type: cleaned.document_type || documentTypeHint.trim(),
     local_document_type: cleaned.local_document_type,
     document_type_confidence: cleaned.document_type_confidence,
@@ -589,6 +810,29 @@ export async function verifyPorDocument({
     local_full_address: cleaned.local_full_address,
     local_full_address_confidence: cleaned.local_full_address_confidence,
     address_notes: cleaned.address_notes,
+    first_name: cleaned.first_name,
+    local_first_name: cleaned.local_first_name,
+    first_name_confidence: cleaned.first_name_confidence,
+    local_first_name_confidence: cleaned.local_first_name_confidence,
+    last_name: cleaned.last_name,
+    local_last_name: cleaned.local_last_name,
+    last_name_confidence: cleaned.last_name_confidence,
+    local_last_name_confidence: cleaned.local_last_name_confidence,
+    middle_name: cleaned.middle_name,
+    local_middle_name: cleaned.local_middle_name,
+    middle_name_confidence: cleaned.middle_name_confidence,
+    local_middle_name_confidence: cleaned.local_middle_name_confidence,
+    local_full_name: cleaned.local_full_name,
+    local_full_name_confidence: cleaned.local_full_name_confidence,
+    romanization_primary_full_name: cleaned.romanization_primary_full_name,
+    romanization_alternatives: cleaned.romanization_alternatives,
+    romanization_notes: cleaned.romanization_notes,
+    first_name_romanization_candidates: cleaned.first_name_romanization_candidates,
+    middle_name_romanization_candidates: cleaned.middle_name_romanization_candidates,
+    last_name_romanization_candidates: cleaned.last_name_romanization_candidates,
+    name_match_result: nameMatch.result,
+    name_match_confidence: nameMatch.confidence,
+    name_match_reason: nameMatch.reason,
     overall_confidence: overallConfidence,
     manual_review_required: manualReviewRequired,
     warnings,
@@ -634,10 +878,19 @@ function validatePoiInputs({
 }
 
 function validatePorInputs({
+  englishName,
   countryHint,
   documentTypeHint,
   documentFile,
 }: VerifyPorInput) {
+  if (!englishName.trim()) {
+    throw new VerificationError(
+      400,
+      "POR 영문 성명을 입력해주세요.",
+      "English name is required.",
+    );
+  }
+
   if (!documentTypeHint.trim()) {
     throw new VerificationError(
       400,
@@ -687,24 +940,38 @@ async function extractPoiWithOpenAI({
 }: VerifyPoiInput & {
   frontBuffer: Buffer;
   backBuffer?: Buffer;
-  mode?: "default" | "name_rescue";
+  mode?: "default" | "name_rescue" | "document_number_rescue";
 }) {
   void _englishName;
+  const typeFingerprint = buildDocumentTypeFingerprint(documentTypeHint);
+  const isJapaneseIndividualNumberRescue =
+    mode === "document_number_rescue" &&
+    backFile &&
+    backBuffer &&
+    isJapaneseCountryHint(countryHint) &&
+    isJapaneseIndividualNumberCardType(typeFingerprint);
+  const isJapaneseDriversLicenseRescue =
+    mode === "document_number_rescue" &&
+    isJapaneseCountryHint(countryHint) &&
+    isJapaneseDriversLicenseType(typeFingerprint);
   const userPromptLines = [
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POI document images and extract the requested fields.",
+    "The image must be a genuine camera photo of a physical document. If it is a screenshot, scan, screen capture, printed copy, rephoto of a printout, or digital composite, mark document_integrity_status tampered even when the text is readable.",
+    "If you cannot clearly tell that the image is a real camera photo of a physical document, do not mark it clean.",
     "The first uploaded image is the front side.",
     "Also assess whether the document looks clean, suspected, or tampered. Do not treat missing or hidden non-required fields as tampering.",
-    mode === "name_rescue"
-      ? "This retry is focused only on the person's name from the front side."
-    : backFile && backBuffer
+    backFile && backBuffer
       ? "A second uploaded image is provided for the back side."
       : "No back-side image is provided.",
     "The front side must contain the person's name. If the front image does not show a readable name, leave the name fields blank.",
     "If the required name is missing or unreadable but there are no other edit artifacts, leave document_integrity_status clean and let the app handle the missing required field.",
     "Do not use the back side to populate first_name, last_name, middle_name, or local_full_name.",
     "Return local OCR text separately whenever it exists.",
+    "For Japanese driver's licenses, document_number is usually on the front side.",
+    "For Japanese My Number Cards / Individual Number Cards, document_number is usually on the back side.",
+    "Use the document-type-appropriate side when extracting document_number.",
     "first_name, last_name, and middle_name must be standardized English or Latin-script values, not the original local script.",
     "The server compares the extracted name with the user's input later. Do not use any external or assumed English spelling to fill extracted name fields.",
     "Do not infer gender without visible OCR label/value evidence.",
@@ -715,43 +982,94 @@ async function extractPoiWithOpenAI({
       "Ignore address, issuer, dates, class, organ-donation notes, and all non-name text unless needed only to orient the card.",
       "On Japanese driver's licenses and ID cards, the name is in the front-side field labeled \u6c0f\u540d. Read that field before any nearby vertical text.",
       "Never copy \u4f4f\u6240 or any place name into local_first_name, local_last_name, or local_full_name.",
-      "Additional rotated views of the same front side may be provided. Use whichever view makes the \u6c0f\u540d field most legible.",
       "Never output placeholder or example names. If the actual name is unreadable, leave every name field blank.",
     );
   }
 
+  if (mode === "document_number_rescue") {
+    userPromptLines.push(
+      "This retry is focused only on document_number.",
+      "Inspect every uploaded image, but prefer the document-type-appropriate side for document_number.",
+      "For Japanese driver's licenses, prioritize the front-side number field.",
+      "For Japanese My Number Cards / Individual Number Cards, prioritize the back-side 12-digit 個人番号 and ignore short serials or auxiliary numbers.",
+      "For Japanese My Number Cards / Individual Number Cards, the 個人番号 is the 12-digit number shown in grouped boxes next to the label 個人番号. Read those grouped digits exactly.",
+      "If one uploaded image contains multiple card views or both front/back content, inspect the full image and use the document-type-appropriate number field.",
+      "Do not use dates, certificate expiry markings, postal codes, barcodes, municipality codes, or contact numbers as document_number.",
+    );
+  }
+
   const userPrompt = userPromptLines.join("\n");
-  const inputContent = [
-    { type: "input_text" as const, text: userPrompt },
-    {
+  const inputContent: Array<
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; image_url: string; detail: "high" }
+  > = [{ type: "input_text" as const, text: userPrompt }];
+
+  if (isJapaneseIndividualNumberRescue && backFile && backBuffer) {
+    inputContent.push({
+      type: "input_image" as const,
+      image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
+      detail: "high" as const,
+    });
+  } else {
+    inputContent.push({
       type: "input_image" as const,
       image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
       detail: "high" as const,
-    },
-    ...(mode === "name_rescue" ? await buildPoiNameRescueImageInputs(frontBuffer) : []),
-  ];
+    });
+
+    if (
+      backFile &&
+      backBuffer &&
+      mode !== "name_rescue" &&
+      !isJapaneseDriversLicenseRescue
+    ) {
+      inputContent.push({
+        type: "input_image" as const,
+        image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
+        detail: "high" as const,
+      });
+    }
+  }
   return executeOpenAiParse({
     schemaName: "poi_document_verification",
     inputContent,
     systemPrompt: buildPoiSystemPrompt(countryHint, mode),
     schema: openAiPoiExtractionSchema,
+    maxOutputTokens:
+      mode === "document_number_rescue"
+        ? 500
+        : mode === "name_rescue"
+          ? 900
+          : 1500,
   }) as Promise<OpenAiPoiExtraction>;
 }
 
 async function extractPorWithOpenAI({
+  englishName: _englishName,
   countryHint,
   documentTypeHint,
   documentFile,
   buffer,
   mode = "default",
-}: VerifyPorInput & { buffer: Buffer; mode?: "default" | "address_rescue" }) {
+}: VerifyPorInput & {
+  buffer: Buffer;
+  mode?: "default" | "address_rescue" | "document_number_rescue";
+}) {
+  void _englishName;
   const userPromptLines = [
     `Issued country: ${countryHint.trim()}`,
     `Document type: ${documentTypeHint.trim()}`,
     "Analyze the POR document image and extract the requested fields.",
+    "The image must be a genuine camera photo of a physical document. If it is a screenshot, scan, screen capture, printed copy, rephoto of a printout, or digital composite, mark document_integrity_status tampered even when the text is readable.",
+    "If you cannot clearly tell that the image is a real camera photo of a physical document, do not mark it clean.",
     "Also assess whether the document looks clean, suspected, or tampered. Do not treat missing or hidden non-required fields as tampering.",
     "Return local OCR text separately whenever it exists.",
+    "If a recipient or addressee name is visible, extract first_name, last_name, middle_name, local_first_name, local_last_name, local_middle_name, local_full_name, romanization_primary_full_name, romanization_alternatives, and the field-specific romanization candidate arrays using the same rules as POI.",
+    "Keep standardized name fields in Latin script and local name fields in the original OCR script.",
+    "Never use sender, issuer, office, branch, or footer names for the recipient name fields.",
+    "The recipient/addressee name and residence address should come from the recipient block, not sender or issuer blocks.",
     "Do not guess postal_code from the address. Leave it blank unless it is explicitly visible.",
+    "Document_number may appear elsewhere on the page, outside the recipient block. Search the full document for an explicit number label or dedicated number field, and never force it to come from the recipient address block.",
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
@@ -762,16 +1080,25 @@ async function extractPorWithOpenAI({
     userPromptLines.push(
       "This is a retry focused on recovering the residence address.",
       "The document may be rotated sideways. Mentally rotate it until the text is upright before reading.",
-      "For Japanese residence cards or residence certificates, inspect the line labeled 住所 and nearby vertical text carefully.",
+      "For Japanese residence cards, residence certificates, My Number cards, driver's licenses, and other address-bearing IDs, inspect the line labeled 住所 and its immediate address text carefully.",
+      "For utility bills, giro slips, and mailed notices, identify the recipient/addressee block first. Use the recipient name and nearby recipient address block, not the issuer or billing summary.",
       "If the address is visible, return local_full_address and split it into state, city, address_1, address_2, and postal_code.",
       "Do not leave the address blank just because the image is rotated. Only leave it blank when it is genuinely unreadable.",
       "If document_type and issued_country are already clear, prioritize recovering the address fields on this retry.",
+      "Document_number may still be elsewhere on the page; only extract it from an explicit label or dedicated field, not from the recipient address block.",
+    );
+  }
+
+  if (mode === "document_number_rescue") {
+    userPromptLines.push(
+      "This is a retry focused only on document_number.",
+      "Search the full document for an explicit customer/account/reference/contract/document number field.",
+      "On utility bills, giro slips, statements, and mailed notices, do not use phone numbers, postal codes, dates, amounts, barcodes, QR payloads, issuer contact numbers, or recipient address digits as document_number.",
+      "Only return document_number when there is a dedicated number field or an explicit label indicating that number.",
     );
   }
 
   const userPrompt = userPromptLines.join("\n");
-  const rotatedAddressViews =
-    mode === "address_rescue" ? await buildPorAddressRescueImageInputs(buffer) : [];
 
   const inputContent = [
     { type: "input_text" as const, text: userPrompt },
@@ -780,7 +1107,6 @@ async function extractPorWithOpenAI({
       image_url: `data:${documentFile.type};base64,${buffer.toString("base64")}`,
       detail: "high" as const,
     },
-    ...rotatedAddressViews,
   ];
 
   return executeOpenAiParse({
@@ -788,31 +1114,20 @@ async function extractPorWithOpenAI({
     inputContent,
     systemPrompt: buildPorSystemPrompt(countryHint, mode),
     schema: openAiPorExtractionSchema,
+    maxOutputTokens:
+      mode === "document_number_rescue"
+        ? 500
+        : mode === "address_rescue"
+          ? 1100
+          : 1500,
   }) as Promise<OpenAiPorExtraction>;
-}
-
-
-async function buildPorAddressRescueImageInputs(buffer: Buffer) {
-  try {
-    const [clockwise, counterClockwise] = await Promise.all([
-      sharp(buffer).rotate(90).png().toBuffer(),
-      sharp(buffer).rotate(270).png().toBuffer(),
-    ]);
-
-    return [clockwise, counterClockwise].map((imageBuffer) => ({
-      type: "input_image" as const,
-      image_url: `data:image/png;base64,${imageBuffer.toString("base64")}`,
-      detail: "high" as const,
-    }));
-  } catch {
-    return [];
-  }
 }
 async function executeOpenAiParse({
   schemaName,
   inputContent,
   systemPrompt,
   schema,
+  maxOutputTokens = 1500,
 }: {
   schemaName: string;
   inputContent: Array<
@@ -823,6 +1138,7 @@ async function executeOpenAiParse({
   schema:
     | typeof openAiPoiExtractionSchema
     | typeof openAiPorExtractionSchema;
+  maxOutputTokens?: number;
 }) {
   const client = getOpenAIClient();
   const modelCandidates = getModelCandidates();
@@ -832,7 +1148,7 @@ async function executeOpenAiParse({
     try {
       const response = await client.responses.parse({
         model,
-        max_output_tokens: 2200,
+        max_output_tokens: maxOutputTokens,
         input: [
           { role: "system", content: systemPrompt },
           { role: "user", content: inputContent },
@@ -1015,7 +1331,7 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     ].filter(Boolean),
   ).join(" ");
 
-  return {
+  let cleaned = {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
@@ -1036,6 +1352,42 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
       extraction.document_integrity_status,
     ),
     document_integrity_notes: cleanText(extraction.document_integrity_notes),
+    first_name: cleanText(extraction.first_name),
+    local_first_name: cleanText(extraction.local_first_name),
+    first_name_confidence: clampConfidence(extraction.first_name_confidence),
+    local_first_name_confidence: clampConfidence(extraction.local_first_name_confidence),
+    last_name: cleanText(extraction.last_name),
+    local_last_name: cleanText(extraction.local_last_name),
+    last_name_confidence: clampConfidence(extraction.last_name_confidence),
+    local_last_name_confidence: clampConfidence(extraction.local_last_name_confidence),
+    middle_name: cleanText(extraction.middle_name),
+    local_middle_name: cleanText(extraction.local_middle_name),
+    middle_name_confidence: clampConfidence(extraction.middle_name_confidence),
+    local_middle_name_confidence: clampConfidence(extraction.local_middle_name_confidence),
+    local_full_name: cleanText(extraction.local_full_name),
+    local_full_name_confidence: clampConfidence(extraction.local_full_name_confidence),
+    romanization_primary_full_name: cleanText(extraction.romanization_primary_full_name),
+    romanization_alternatives: uniqueNameList(
+      extraction.romanization_alternatives
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
+    romanization_notes: cleanText(extraction.romanization_notes),
+    first_name_romanization_candidates: uniqueNameList(
+      extraction.first_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
+    middle_name_romanization_candidates: uniqueNameList(
+      extraction.middle_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
+    last_name_romanization_candidates: uniqueNameList(
+      extraction.last_name_romanization_candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean),
+    ),
     country: cleanUppercaseText(extraction.country),
     local_country: cleanText(extraction.local_country),
     country_confidence: clampConfidence(extraction.country_confidence),
@@ -1061,6 +1413,12 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     manual_review_required: extraction.manual_review_required,
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
+
+  if (shouldApplyJapanesePoiHeuristics(cleaned)) {
+    cleaned = normalizeJapanesePoiExtraction(cleaned);
+  }
+
+  return preferOriginalLocalPoiNameScripts(cleaned);
 }
 
 function rebalanceJapanesePorLocalAddress({
@@ -1162,12 +1520,16 @@ function buildPorWarnings(
     documentQualityConfidence,
     postalLookupWarning,
     hasPostalCode,
+    nameMatchRequiresReview,
+    hasVisibleNameEvidence,
   }: {
     documentIntegrityStatus: DocumentIntegrityStatus;
     documentIntegrityNotes: string;
     documentQualityConfidence: number;
     postalLookupWarning: string;
     hasPostalCode: boolean;
+    nameMatchRequiresReview: boolean;
+    hasVisibleNameEvidence: boolean;
   },
 ) {
   const warnings: string[] = [];
@@ -1189,6 +1551,14 @@ function buildPorWarnings(
 
   if (!hasPostalCode) {
     warnings.push("OCR 또는 조회 결과로 Postal code를 확인하지 못했습니다.");
+  }
+
+  if (!hasVisibleNameEvidence) {
+    warnings.push("이름 정보를 신뢰도 있게 판독하지 못했습니다.");
+  }
+
+  if (nameMatchRequiresReview) {
+    warnings.push("이름 정합도 또는 로마자 판독이 모호해 수동 검토가 필요합니다.");
   }
 
   if (postalLookupWarning) {
@@ -1284,18 +1654,28 @@ function shouldRetryPorAddressExtraction(
     documentTypeHint: string;
   },
 ) {
-  const normalizedDocType = normalizeLooseText(documentTypeHint);
-  const isJapaneseResidenceDocument =
-    isJapaneseCountryHint(countryHint) &&
-    (normalizedDocType.includes("residence") ||
-      normalizedDocType.includes("card") ||
-      normalizedDocType.includes("permit"));
+  if (!isJapaneseCountryHint(countryHint)) {
+    return false;
+  }
 
-  return (
-    isJapaneseResidenceDocument &&
-    getPorAddressExtractionScore(extraction) <= 2 &&
-    Boolean(extraction.document_type || extraction.issued_country)
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    extraction.document_type,
+    extraction.local_document_type,
   );
+  const quickScore = getPorAddressExtractionScore(extraction);
+  const suspiciousAddress =
+    hasSenderLikeAddressSignals(extraction) || hasWeakPorAddressEvidence(extraction);
+
+  if (isUtilityLikeDocumentType(typeFingerprint)) {
+    return quickScore < 6 || suspiciousAddress;
+  }
+
+  if (isAddressBearingIdDocumentType(typeFingerprint)) {
+    return quickScore < 5 || suspiciousAddress;
+  }
+
+  return false;
 }
 
 function getPorAddressExtractionScore(extraction: ReturnType<typeof sanitizePorExtraction>) {
@@ -1310,6 +1690,81 @@ function getPorAddressExtractionScore(extraction: ReturnType<typeof sanitizePorE
   ];
 
   return fields.filter(Boolean).length;
+}
+
+async function scorePorAddressCandidate(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    extraction.document_type,
+    extraction.local_document_type,
+  );
+  const fieldsScore =
+    (extraction.country ? 2 : 0) +
+    (extraction.state ? 3 : 0) +
+    (extraction.city ? 3 : 0) +
+    (extraction.address_1 ? 3 : 0) +
+    (extraction.address_2 ? 1.5 : 0) +
+    (extraction.local_full_address ? 4 : 0) +
+    (extraction.postal_code ? 2 : 0);
+  const confidenceScore =
+    clampConfidence(
+      averageConfidence([
+        extraction.country_confidence,
+        extraction.state_confidence,
+        extraction.city_confidence,
+        extraction.address_1_confidence,
+        extraction.address_2_confidence,
+        extraction.local_full_address_confidence,
+        extraction.postal_code_confidence,
+      ]),
+    ) * 6;
+  let total = fieldsScore + confidenceScore;
+
+  if (hasSenderLikeAddressSignals(extraction)) {
+    total -= isUtilityLikeDocumentType(typeFingerprint) ? 8 : 4;
+  }
+
+  if (hasWeakPorAddressEvidence(extraction)) {
+    total -= 3;
+  }
+
+  if (isJapaneseCountryHint(countryHint)) {
+    const lookup = await lookupJapanPostalCode({
+      issuedCountry: extraction.issued_country || countryHint.trim(),
+      country: extraction.country,
+      localCountry: extraction.local_country,
+      localState: extraction.local_state,
+      localCity: extraction.local_city,
+      localAddress1: extraction.local_address_1,
+      localAddress2: extraction.local_address_2,
+    });
+
+    if (lookup.postalCode) {
+      if (!extraction.postal_code || extraction.postal_code === lookup.postalCode) {
+        total += 4;
+      } else {
+        total -= 2;
+      }
+    } else if (!extraction.postal_code && isUtilityLikeDocumentType(typeFingerprint)) {
+      total -= 1.5;
+    }
+  }
+
+  if (isUtilityLikeDocumentType(typeFingerprint)) {
+    total += extraction.local_full_name ? 1.5 : -1;
+    total += extraction.address_notes ? 0.5 : 0;
+  }
+
+  return total;
 }
 
 function derivePorReviewStatus({
@@ -1334,6 +1789,22 @@ function derivePorReviewStatus({
   postalCodeConfidence,
   localFullAddress,
   postalCodeSource,
+  nameMatchResult,
+  nameMatchConfidence,
+  firstName,
+  firstNameConfidence,
+  localFirstNameConfidence,
+  lastName,
+  lastNameConfidence,
+  localLastNameConfidence,
+  middleName,
+  middleNameConfidence,
+  localMiddleNameConfidence,
+  localFirstName,
+  localLastName,
+  localMiddleName,
+  localFullName,
+  localFullNameConfidence,
 }: {
   manualReviewRequired: boolean;
   documentIntegrityStatus: DocumentIntegrityStatus;
@@ -1356,11 +1827,30 @@ function derivePorReviewStatus({
   postalCodeConfidence: number;
   localFullAddress: string;
   postalCodeSource: PorVerificationResult["postal_code_source"];
+  nameMatchResult: MatchResult;
+  nameMatchConfidence: number;
+  firstName: string;
+  firstNameConfidence: number;
+  localFirstNameConfidence: number;
+  lastName: string;
+  lastNameConfidence: number;
+  localLastNameConfidence: number;
+  middleName: string;
+  middleNameConfidence: number;
+  localMiddleNameConfidence: number;
+  localFirstName: string;
+  localLastName: string;
+  localMiddleName: string;
+  localFullName: string;
+  localFullNameConfidence: number;
 }): ReviewStatus {
   const hasVisibleAddressEvidence = Boolean(
     localFullAddress || localCountry || localState || localCity || localAddress1 || localAddress2,
   );
   const hasCoreAddressEvidence = Boolean(country && state && city && address1);
+  const hasVisibleNameEvidence = Boolean(
+    localFullName || localFirstName || localLastName || localMiddleName || (firstName && lastName),
+  );
   const coreFields = [
     { value: country, confidence: countryConfidence },
     { value: state, confidence: stateConfidence },
@@ -1368,6 +1858,12 @@ function derivePorReviewStatus({
     { value: address1, confidence: address1Confidence },
     { value: address2, confidence: address2Confidence },
     { value: postalCode, confidence: postalCodeConfidence },
+  ];
+  const nameFields = [
+    { value: firstName || localFirstName, confidence: firstNameConfidence || localFirstNameConfidence },
+    { value: lastName || localLastName, confidence: lastNameConfidence || localLastNameConfidence },
+    { value: middleName || localMiddleName, confidence: middleNameConfidence || localMiddleNameConfidence },
+    { value: localFullName, confidence: localFullNameConfidence },
   ];
 
   if (!hasVisibleAddressEvidence) {
@@ -1382,10 +1878,19 @@ function derivePorReviewStatus({
     return "검토";
   }
 
+  if (!hasVisibleNameEvidence) {
+    return "검토";
+  }
+
   if (
     !hasCoreAddressEvidence ||
     (postalCodeSource === "none" && !postalCode) ||
     hasLowConfidencePresentField(coreFields, 0.65) ||
+    hasLowConfidencePresentField(nameFields, 0.55) ||
+    nameMatchResult === "manual_review" ||
+    nameMatchResult === "possible_match" ||
+    nameMatchResult === "mismatch" ||
+    nameMatchConfidence < 0.78 ||
     (manualReviewRequired && hasLowConfidencePresentField(coreFields, 0.8))
   ) {
     return "검토";
@@ -1556,11 +2061,33 @@ function shouldRunJapanesePoiNameRescue({
   documentTypeHint,
   issuedCountry,
   localIssuedCountry,
+  firstName,
+  firstNameConfidence,
+  localFirstName,
+  localFirstNameConfidence,
+  lastName,
+  lastNameConfidence,
+  localLastName,
+  localLastNameConfidence,
+  localFullName,
+  localFullNameConfidence,
+  romanizationPrimaryFullName,
 }: {
   countryHint: string;
   documentTypeHint: string;
   issuedCountry: string;
   localIssuedCountry: string;
+  firstName: string;
+  firstNameConfidence: number;
+  localFirstName: string;
+  localFirstNameConfidence: number;
+  lastName: string;
+  lastNameConfidence: number;
+  localLastName: string;
+  localLastNameConfidence: number;
+  localFullName: string;
+  localFullNameConfidence: number;
+  romanizationPrimaryFullName: string;
 }) {
   const normalizedDocType = normalizeLooseText(documentTypeHint);
   const isJapaneseDocument =
@@ -1570,7 +2097,38 @@ function shouldRunJapanesePoiNameRescue({
       normalizedDocType.includes("id") ||
       normalizedDocType.includes("card"));
 
-  return isJapaneseDocument;
+  if (!isJapaneseDocument) {
+    return false;
+  }
+
+  if (!hasPoiNameEvidence({
+    first_name: firstName,
+    last_name: lastName,
+    local_first_name: localFirstName,
+    local_last_name: localLastName,
+    local_full_name: localFullName,
+    romanization_primary_full_name: romanizationPrimaryFullName,
+  })) {
+    return true;
+  }
+
+  return hasLowConfidencePresentField(
+    [
+      {
+        value: localFirstName || firstName,
+        confidence: localFirstNameConfidence || firstNameConfidence,
+      },
+      {
+        value: localLastName || lastName,
+        confidence: localLastNameConfidence || lastNameConfidence,
+      },
+      {
+        value: localFullName,
+        confidence: localFullNameConfidence,
+      },
+    ],
+    0.62,
+  );
 }
 
 function hasPoiNameEvidence(value: {
@@ -1655,6 +2213,509 @@ function mergePoiNameExtraction<
   };
 }
 
+function normalizePoiDocumentNumberForType<
+  T extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(
+  value: T,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  const nextValue = { ...value };
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    nextValue.document_type,
+    nextValue.local_document_type,
+  );
+
+  if (!isJapaneseCountryHint(countryHint)) {
+    return nextValue;
+  }
+
+  if (isJapaneseIndividualNumberCardType(typeFingerprint)) {
+    const individualNumber =
+      extractJapaneseIndividualNumber(nextValue.document_number) ||
+      extractJapaneseIndividualNumber(nextValue.local_document_number);
+
+    if (!individualNumber) {
+      return {
+        ...nextValue,
+        document_number: "",
+        local_document_number: "",
+        document_number_confidence: 0,
+      };
+    }
+
+    return {
+      ...nextValue,
+      document_number: individualNumber,
+      local_document_number: nextValue.local_document_number || individualNumber,
+      document_number_confidence: Math.max(
+        nextValue.document_number_confidence,
+        nextValue.local_document_number ? 0.93 : 0.88,
+      ),
+    };
+  }
+
+  return nextValue;
+}
+
+function normalizePorDocumentNumberForType<
+  T extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(
+  value: T,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  const nextValue = { ...value };
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    nextValue.document_type,
+    nextValue.local_document_type,
+  );
+
+  if (isJapaneseCountryHint(countryHint) && isJapaneseIndividualNumberCardType(typeFingerprint)) {
+    const individualNumber =
+      extractJapaneseIndividualNumber(nextValue.document_number) ||
+      extractJapaneseIndividualNumber(nextValue.local_document_number);
+
+    return {
+      ...nextValue,
+      document_number: individualNumber,
+      local_document_number: individualNumber
+        ? nextValue.local_document_number || individualNumber
+        : "",
+      document_number_confidence: individualNumber
+        ? Math.max(nextValue.document_number_confidence, 0.9)
+        : 0,
+    };
+  }
+
+  if (!isUtilityLikeDocumentType(typeFingerprint)) {
+    return nextValue;
+  }
+
+  const standardizedCandidate = normalizePorDocumentNumberCandidate(
+    nextValue.document_number,
+    typeFingerprint,
+  );
+  const localCandidate = normalizePorDocumentNumberCandidate(
+    nextValue.local_document_number,
+    typeFingerprint,
+  );
+  const bestCandidate = standardizedCandidate || localCandidate;
+
+  if (!bestCandidate) {
+    return {
+      ...nextValue,
+      document_number: "",
+      local_document_number: "",
+      document_number_confidence: 0,
+    };
+  }
+
+  return {
+    ...nextValue,
+    document_number: bestCandidate,
+    local_document_number: localCandidate,
+    document_number_confidence: Math.max(
+      nextValue.document_number_confidence,
+      localCandidate ? 0.78 : 0.68,
+    ),
+  };
+}
+
+function shouldRunPoiDocumentNumberRescue({
+  countryHint,
+  documentTypeHint,
+  detectedDocumentType,
+  localDocumentType,
+  backProvided,
+  documentNumber,
+  localDocumentNumber,
+  documentNumberConfidence,
+}: {
+  countryHint: string;
+  documentTypeHint: string;
+  detectedDocumentType: string;
+  localDocumentType: string;
+  backProvided: boolean;
+  documentNumber: string;
+  localDocumentNumber: string;
+  documentNumberConfidence: number;
+}) {
+  if (!isJapaneseCountryHint(countryHint)) {
+    return false;
+  }
+
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    detectedDocumentType,
+    localDocumentType,
+  );
+
+  if (isJapaneseIndividualNumberCardType(typeFingerprint)) {
+    const hasValidIndividualNumber = Boolean(
+      extractJapaneseIndividualNumber(documentNumber) ||
+        extractJapaneseIndividualNumber(localDocumentNumber),
+    );
+
+    return backProvided && (!hasValidIndividualNumber || documentNumberConfidence < 0.9);
+  }
+
+  if (isJapaneseDriversLicenseType(typeFingerprint)) {
+    return (!documentNumber && !localDocumentNumber) || documentNumberConfidence < 0.72;
+  }
+
+  return false;
+}
+
+function isBetterPoiDocumentNumberExtraction<
+  T extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(baseValue: T, rescueValue: T) {
+  return scorePoiDocumentNumberCandidate(rescueValue) > scorePoiDocumentNumberCandidate(baseValue);
+}
+
+function mergePoiDocumentNumberExtraction<
+  T extends {
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+    warnings: string[];
+  },
+>(baseValue: T, rescueValue: T) {
+  return {
+    ...baseValue,
+    document_number: rescueValue.document_number,
+    local_document_number: rescueValue.local_document_number,
+    document_number_confidence: rescueValue.document_number_confidence,
+    warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
+  };
+}
+
+function shouldRunPorDocumentNumberRescue(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  if (!isJapaneseCountryHint(countryHint)) {
+    return false;
+  }
+
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    extraction.document_type,
+    extraction.local_document_type,
+  );
+
+  if (isJapaneseIndividualNumberCardType(typeFingerprint)) {
+    const hasValidIndividualNumber = Boolean(
+      extractJapaneseIndividualNumber(extraction.document_number) ||
+        extractJapaneseIndividualNumber(extraction.local_document_number),
+    );
+
+    return !hasValidIndividualNumber || extraction.document_number_confidence < 0.9;
+  }
+
+  if (isUtilityLikeDocumentType(typeFingerprint)) {
+    return (
+      !normalizePorDocumentNumberCandidate(extraction.document_number, typeFingerprint) &&
+      !normalizePorDocumentNumberCandidate(extraction.local_document_number, typeFingerprint)
+    );
+  }
+
+  return false;
+}
+
+function isBetterPorDocumentNumberExtraction(
+  baseValue: ReturnType<typeof sanitizePorExtraction>,
+  rescueValue: ReturnType<typeof sanitizePorExtraction>,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    baseValue.document_type || rescueValue.document_type,
+    baseValue.local_document_type || rescueValue.local_document_type,
+  );
+
+  return (
+    scorePorDocumentNumberCandidate(baseValue, typeFingerprint, countryHint) <
+    scorePorDocumentNumberCandidate(rescueValue, typeFingerprint, countryHint)
+  );
+}
+
+function mergePorDocumentNumberExtraction<
+  T extends {
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+    warnings: string[];
+  },
+>(baseValue: T, rescueValue: T) {
+  return {
+    ...baseValue,
+    document_number: rescueValue.document_number,
+    local_document_number: rescueValue.local_document_number,
+    document_number_confidence: rescueValue.document_number_confidence,
+    warnings: uniqueStrings([...baseValue.warnings, ...rescueValue.warnings]),
+  };
+}
+
+function buildDocumentTypeFingerprint(...values: string[]) {
+  return values.map((value) => normalizeLooseText(value)).filter(Boolean).join(" ");
+}
+
+function isJapaneseIndividualNumberCardType(typeFingerprint: string) {
+  return (
+    typeFingerprint.includes("individualnumber") ||
+    typeFingerprint.includes("mynumber") ||
+    typeFingerprint.includes("個人番号カード") ||
+    typeFingerprint.includes("マイナンバー") ||
+    (typeFingerprint.includes("idcard") && typeFingerprint.includes("個人番号"))
+  );
+}
+
+function isJapaneseDriversLicenseType(typeFingerprint: string) {
+  return (
+    typeFingerprint.includes("driver") ||
+    typeFingerprint.includes("license") ||
+    typeFingerprint.includes("運転免許")
+  );
+}
+
+function isUtilityLikeDocumentType(typeFingerprint: string) {
+  return [
+    "utility",
+    "bill",
+    "giro",
+    "statement",
+    "invoice",
+    "notice",
+    "請求",
+    "料金",
+    "利用",
+    "振替",
+    "納付",
+    "ご案内",
+  ].some((keyword) => typeFingerprint.includes(normalizeLooseText(keyword)));
+}
+
+function isAddressBearingIdDocumentType(typeFingerprint: string) {
+  return (
+    typeFingerprint.includes("residence") ||
+    typeFingerprint.includes("record") ||
+    typeFingerprint.includes("certificate") ||
+    typeFingerprint.includes("permit") ||
+    typeFingerprint.includes("card") ||
+    typeFingerprint.includes("license") ||
+    typeFingerprint.includes("住民票") ||
+    typeFingerprint.includes("在留") ||
+    typeFingerprint.includes("免許")
+  );
+}
+
+function hasSenderLikeAddressSignals(extraction: ReturnType<typeof sanitizePorExtraction>) {
+  const combined = normalizeLooseText(
+    [
+      extraction.local_full_address,
+      extraction.local_address_1,
+      extraction.local_address_2,
+      extraction.address_notes,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+
+  if (!combined) {
+    return false;
+  }
+
+  const senderMarkers = [
+    "株式会社",
+    "有限会社",
+    "営業所",
+    "支店",
+    "本社",
+    "センター",
+    "総務",
+    "水道",
+    "役所",
+    "課",
+    "係",
+    "ntt",
+    "ファイナンス",
+    "お問い合わせ",
+    "問合せ",
+    "ご案内",
+    "料金",
+    "請求",
+    "電話",
+    "tel",
+    "customer service",
+  ];
+
+  return senderMarkers.some((marker) => combined.includes(normalizeLooseText(marker)));
+}
+
+function hasWeakPorAddressEvidence(extraction: ReturnType<typeof sanitizePorExtraction>) {
+  if (!extraction.local_full_address && !extraction.local_address_1 && !extraction.local_address_2) {
+    return true;
+  }
+
+  if (!extraction.state || !extraction.city || !extraction.address_1) {
+    return true;
+  }
+
+  return hasLowConfidencePresentField(
+    [
+      { value: extraction.state || extraction.local_state, confidence: extraction.state_confidence },
+      { value: extraction.city || extraction.local_city, confidence: extraction.city_confidence },
+      { value: extraction.address_1 || extraction.local_address_1, confidence: extraction.address_1_confidence },
+    ],
+    0.62,
+  );
+}
+
+function extractJapaneseIndividualNumber(value: string) {
+  const digits = cleanText(value).replace(/\D/g, "");
+
+  if (digits.length !== 12) {
+    return "";
+  }
+
+  return `${digits.slice(0, 4)} ${digits.slice(4, 8)} ${digits.slice(8)}`;
+}
+
+function normalizePorDocumentNumberCandidate(value: string, typeFingerprint: string) {
+  const candidate = cleanDocumentNumberText(value);
+
+  if (!candidate || !looksLikeDocumentNumber(candidate)) {
+    return "";
+  }
+
+  if (isUtilityLikeDocumentType(typeFingerprint)) {
+    if (
+      isLikelyPhoneLikeNumber(candidate) ||
+      isLikelyPostalCodeLikeNumber(candidate) ||
+      isLikelyDateLikeNumber(candidate) ||
+      isLikelyAmountLikeNumber(candidate) ||
+      isLikelyBarcodePayload(candidate)
+    ) {
+      return "";
+    }
+  }
+
+  return candidate;
+}
+
+function scorePoiDocumentNumberCandidate<
+  T extends {
+    document_type: string;
+    local_document_type: string;
+    document_number: string;
+    local_document_number: string;
+    document_number_confidence: number;
+  },
+>(value: T) {
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    value.document_type,
+    value.local_document_type,
+  );
+  const isIndividualNumber = isJapaneseIndividualNumberCardType(typeFingerprint);
+  const candidate = isIndividualNumber
+    ? extractJapaneseIndividualNumber(value.document_number || value.local_document_number)
+    : cleanDocumentNumberText(value.document_number || value.local_document_number);
+
+  if (!candidate) {
+    return 0;
+  }
+
+  return (
+    (isIndividualNumber ? 10 : 6) +
+    clampConfidence(value.document_number_confidence) * 5 +
+    (value.local_document_number ? 1 : 0)
+  );
+}
+
+function scorePorDocumentNumberCandidate(
+  value: ReturnType<typeof sanitizePorExtraction>,
+  typeFingerprint: string,
+  countryHint: string,
+) {
+  const candidate = isJapaneseCountryHint(countryHint) && isJapaneseIndividualNumberCardType(typeFingerprint)
+    ? extractJapaneseIndividualNumber(value.document_number || value.local_document_number)
+    : normalizePorDocumentNumberCandidate(
+        value.document_number || value.local_document_number,
+        typeFingerprint,
+      );
+
+  if (!candidate) {
+    return 0;
+  }
+
+  return 6 + clampConfidence(value.document_number_confidence) * 5 + (value.local_document_number ? 1 : 0);
+}
+
+function isLikelyPhoneLikeNumber(value: string) {
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 10 && digits.length <= 11 && digits.startsWith("0");
+}
+
+function isLikelyPostalCodeLikeNumber(value: string) {
+  return value.replace(/\D/g, "").length === 7;
+}
+
+function isLikelyDateLikeNumber(value: string) {
+  return /\b(?:19|20)\d{2}[-/.]?\d{1,2}[-/.]?\d{1,2}\b/.test(value);
+}
+
+function isLikelyAmountLikeNumber(value: string) {
+  return /[¥円]/u.test(value) || /^\d{1,3}(?:,\d{3})+$/.test(value);
+}
+
+function isLikelyBarcodePayload(value: string) {
+  const compact = value.replace(/[^0-9A-Za-z]/g, "");
+  return compact.length >= 18;
+}
+
 function shouldClearInferredPoiNationality(value: {
   nationality: string;
   local_nationality: string;
@@ -1684,23 +2745,6 @@ function shouldClearInferredPoiNationality(value: {
     normalizedDocumentType.includes("license") ||
     normalizedDocumentType.includes("\u904b\u8ee2")
   );
-}
-
-async function buildPoiNameRescueImageInputs(frontBuffer: Buffer) {
-  try {
-    const [clockwise, counterClockwise] = await Promise.all([
-      sharp(frontBuffer).rotate(90).png().toBuffer(),
-      sharp(frontBuffer).rotate(270).png().toBuffer(),
-    ]);
-
-    return [clockwise, counterClockwise].map((buffer) => ({
-      type: "input_image" as const,
-      image_url: `data:image/png;base64,${buffer.toString("base64")}`,
-      detail: "high" as const,
-    }));
-  } catch {
-    return [];
-  }
 }
 
 function parseJapaneseRecipientAddress({

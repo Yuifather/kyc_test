@@ -46,6 +46,7 @@ export async function POST(request: Request) {
       }
 
       const result = await verifyPorDocument({
+        englishName,
         countryHint,
         documentTypeHint,
         documentFile,

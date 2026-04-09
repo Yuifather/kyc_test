@@ -35,7 +35,7 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
   const statusReasons = buildStatusReasons(result);
   const gridClass = isPoi
     ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
-    : "sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto_auto]";
+    : "sm:grid-cols-[0.95fr_1.05fr_1.05fr_auto_auto_auto]";
 
   return (
     <div className="space-y-5">
@@ -69,7 +69,8 @@ export function VerificationResults({ result }: { result: VerificationResult }) 
           <p>항목</p>
           <p>표준화 항목</p>
           <p>로컬 항목</p>
-          <p className="sm:text-right">{isPoi ? "이름 정합성" : "조회"}</p>
+          <p className="sm:text-right">이름 정합성</p>
+          {!isPoi ? <p className="sm:text-right">조회</p> : null}
           <p className="sm:text-right">Confidence</p>
         </div>
 
@@ -96,8 +97,11 @@ function getStatusPanelClass(reviewStatus: VerificationResult["review_status"]) 
 }
 
 function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
-  const standardizedNames = derivePoiStandardizedNames(result);
-  const nameConsistency = derivePoiNameConsistency(result, standardizedNames);
+  const standardizedNames = deriveStandardizedNames(
+    result.user_input_english_name,
+    isJapaneseIssuedCountry(result),
+  );
+  const nameConsistency = deriveNameConsistency(result, standardizedNames);
 
   return [
     {
@@ -188,6 +192,12 @@ function buildPoiRows(result: PoiVerificationResult): DetailRow[] {
 }
 
 function buildPorRows(result: PorVerificationResult): DetailRow[] {
+  const standardizedNames = deriveStandardizedNames(
+    result.user_input_english_name,
+    isJapaneseIssuedCountry(result),
+  );
+  const nameConsistency = deriveNameConsistency(result, standardizedNames);
+
   return [
     {
       label: "Document type",
@@ -212,6 +222,42 @@ function buildPorRows(result: PorVerificationResult): DetailRow[] {
       standardizedValue: result.date_of_expiry,
       localValue: result.local_date_of_expiry,
       confidence: result.date_of_expiry_confidence,
+    },
+    {
+      label: "First name",
+      standardizedValue: standardizedNames.firstName,
+      localValue: result.local_first_name,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_first_name,
+        result.local_first_name_confidence,
+        standardizedNames.firstName,
+        result.first_name_confidence,
+      ),
+      nameConsistency: nameConsistency.firstName,
+    },
+    {
+      label: "Last name",
+      standardizedValue: standardizedNames.lastName,
+      localValue: result.local_last_name,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_last_name,
+        result.local_last_name_confidence,
+        standardizedNames.lastName,
+        result.last_name_confidence,
+      ),
+      nameConsistency: nameConsistency.lastName,
+    },
+    {
+      label: "Middle name",
+      standardizedValue: standardizedNames.middleName,
+      localValue: result.local_middle_name,
+      confidence: getDisplayedNameOcrConfidence(
+        result.local_middle_name,
+        result.local_middle_name_confidence,
+        standardizedNames.middleName,
+        result.middle_name_confidence,
+      ),
+      nameConsistency: nameConsistency.middleName,
     },
     {
       label: "Country",
@@ -279,7 +325,7 @@ function ResultRow({
   const isPoi = variant === "poi";
   const gridClass = isPoi
     ? "sm:grid-cols-[0.9fr_1fr_1fr_auto_auto]"
-    : "sm:grid-cols-[0.95fr_1.1fr_1.1fr_auto_auto]";
+    : "sm:grid-cols-[0.95fr_1.05fr_1.05fr_auto_auto_auto]";
 
   return (
     <div
@@ -302,33 +348,13 @@ function ResultRow({
       </div>
 
       <div className="justify-self-start sm:justify-self-end">
-        {isPoi ? (
-          typeof row.nameConsistency === "number" ? (
-            <span
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
-                row.nameConsistency,
-              )]}`}
-            >
-              {formatConfidence(row.nameConsistency)}
-            </span>
-          ) : (
-            <span
-              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
-            >
-              -
-            </span>
-          )
-        ) : row.lookupSource === "OCR" ? (
+        {typeof row.nameConsistency === "number" ? (
           <span
-            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.ocr}`}
+            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${confidenceClasses[getConfidenceTone(
+              row.nameConsistency,
+            )]}`}
           >
-            OCR
-          </span>
-        ) : row.lookupSource === "조회" ? (
-          <span
-            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.lookup}`}
-          >
-            조회
+            {formatConfidence(row.nameConsistency)}
           </span>
         ) : (
           <span
@@ -338,6 +364,30 @@ function ResultRow({
           </span>
         )}
       </div>
+
+      {!isPoi ? (
+        <div className="justify-self-start sm:justify-self-end">
+          {row.lookupSource === "OCR" ? (
+            <span
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.ocr}`}
+            >
+              OCR
+            </span>
+          ) : row.lookupSource === "조회" ? (
+            <span
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${sourceClasses.lookup}`}
+            >
+              조회
+            </span>
+          ) : (
+            <span
+              className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${neutralBadgeClass}`}
+            >
+              -
+            </span>
+          )}
+        </div>
+      ) : null}
 
       <div className="justify-self-start sm:justify-self-end">
         <span
@@ -352,16 +402,18 @@ function ResultRow({
   );
 }
 
-function derivePoiStandardizedNames(result: PoiVerificationResult) {
-  const shouldUppercaseNames = isJapaneseIssuedCountry(result);
+function deriveStandardizedNames(
+  userInputEnglishName: string,
+  shouldUppercaseNames: boolean,
+) {
   return applyJapanesePoiNameCasing(
-    splitRomanizedPoiFullName(result.user_input_english_name, false),
+    splitRomanizedPoiFullName(userInputEnglishName, false),
     shouldUppercaseNames,
   );
 }
 
-function derivePoiNameConsistency(
-  result: PoiVerificationResult,
+function deriveNameConsistency(
+  result: PoiVerificationResult | PorVerificationResult,
   standardizedNames: { firstName: string; middleName: string; lastName: string },
 ) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
@@ -372,9 +424,9 @@ function derivePoiNameConsistency(
       lastName: null,
     };
 
-  const firstNameCandidates = collectPoiNameConsistencyCandidates(result, "firstName");
-  const middleNameCandidates = collectPoiNameConsistencyCandidates(result, "middleName");
-  const lastNameCandidates = collectPoiNameConsistencyCandidates(result, "lastName");
+  const firstNameCandidates = collectNameConsistencyCandidates(result, "firstName");
+  const middleNameCandidates = collectNameConsistencyCandidates(result, "middleName");
+  const lastNameCandidates = collectNameConsistencyCandidates(result, "lastName");
 
   bestScores.firstName = scoreNameCandidatesAgainstStandardized(
     standardizedNames.firstName,
@@ -402,8 +454,8 @@ function derivePoiNameConsistency(
   };
 }
 
-function collectPoiNameConsistencyCandidates(
-  result: PoiVerificationResult,
+function collectNameConsistencyCandidates(
+  result: PoiVerificationResult | PorVerificationResult,
   field: "firstName" | "middleName" | "lastName",
 ) {
   const fieldCandidates =
@@ -412,10 +464,17 @@ function collectPoiNameConsistencyCandidates(
       : field === "middleName"
         ? result.middle_name_romanization_candidates
         : result.last_name_romanization_candidates;
+  const fieldStandardizedValue =
+    field === "firstName"
+      ? result.first_name
+      : field === "middleName"
+        ? result.middle_name
+        : result.last_name;
 
   const baseCandidates = uniqueNameList([
     result.romanization_primary_full_name,
     ...result.romanization_alternatives,
+    fieldStandardizedValue,
     ...fieldCandidates,
   ]);
 
@@ -625,7 +684,12 @@ function hasLatinScript(value: string) {
   return /[\p{Script=Latin}]/u.test(value);
 }
 
-function isJapaneseIssuedCountry(result: PoiVerificationResult) {
+type JapaneseIssuedCountryLike = Pick<
+  VerificationResult,
+  "issued_country" | "local_issued_country" | "document_type" | "local_document_type"
+>;
+
+function isJapaneseIssuedCountry(result: JapaneseIssuedCountryLike) {
   const normalizedValues = [
     result.issued_country,
     result.local_issued_country,
