@@ -355,7 +355,7 @@ function ResultRow({
 function derivePoiStandardizedNames(result: PoiVerificationResult) {
   const shouldUppercaseNames = isJapaneseIssuedCountry(result);
   return applyJapanesePoiNameCasing(
-    splitRomanizedPoiFullName(result.user_input_english_name, shouldUppercaseNames),
+    splitRomanizedPoiFullName(result.user_input_english_name, false),
     shouldUppercaseNames,
   );
 }
