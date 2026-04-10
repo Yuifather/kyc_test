@@ -4,16 +4,23 @@ import { z } from "zod";
 import { averageConfidence, clampConfidence } from "@/lib/confidence";
 import { resolveGenderExtraction } from "@/lib/gender-extraction";
 import { inspectImageQuality } from "@/lib/image-quality";
-import { lookupJapanPostalCode } from "@/lib/japan-post";
+import {
+  lookupJapanAddressByPostalCode,
+  lookupJapanPostalCode,
+} from "@/lib/japan-post";
 import { matchRomanizedName } from "@/lib/name-matcher";
 import { normalizeLooseText, uniqueNameList } from "@/lib/name-normalizer";
 import { getModelCandidates, getOpenAIClient } from "@/lib/openai";
 import {
   type OpenAiDocumentNumberRescueExtraction,
+  type OpenAiJapaneseAddressNormalizationExtraction,
   type OpenAiPoiExtraction,
+  type OpenAiPorRecipientBlockExtraction,
   type OpenAiPorExtraction,
   openAiDocumentNumberRescueSchema,
+  openAiJapaneseAddressNormalizationSchema,
   openAiPoiExtractionSchema,
+  openAiPorRecipientBlockSchema,
   openAiPorExtractionSchema,
 } from "@/lib/openai-schema";
 import type {
@@ -84,12 +91,22 @@ function buildPoiSystemPrompt(
 
 function buildPorSystemPrompt(
   countryHint: string,
-  mode: "default" | "address_rescue" | "document_number_rescue",
+  mode:
+    | "default"
+    | "recipient_block"
+    | "address_rescue"
+    | "document_number_rescue",
 ) {
   const sections = [GLOBAL_POR_SYSTEM_PROMPT];
 
   if (isJapaneseCountryHint(countryHint)) {
     sections.push(JAPANESE_POR_SYSTEM_PROMPT);
+  }
+
+  if (mode === "recipient_block") {
+    sections.push(
+      "Recipient-block mode: identify the addressee block first, return only the recipient name line, the recipient residence address block, the visible recipient postal code, and any explicit document-number field with its label.",
+    );
   }
 
   if (mode === "address_rescue") {
@@ -351,6 +368,8 @@ export async function verifyPoiDocument({
       englishName,
       countryHint,
       documentTypeHint,
+      detectedDocumentType: cleaned.document_type,
+      localDocumentType: cleaned.local_document_type,
       frontFile,
       backFile,
       frontBuffer,
@@ -358,7 +377,12 @@ export async function verifyPoiDocument({
     });
     const documentNumberRescueCleaned = normalizePoiDocumentNumberRescueExtraction(
       documentNumberRescueExtraction,
-      { countryHint, documentTypeHint },
+      {
+        countryHint,
+        documentTypeHint,
+        detectedDocumentType: cleaned.document_type,
+        localDocumentType: cleaned.local_document_type,
+      },
     );
 
     if (isBetterPoiDocumentNumberExtraction(cleaned, documentNumberRescueCleaned)) {
@@ -529,19 +553,37 @@ export async function verifyPorDocument({
 
   const buffer = Buffer.from(await documentFile.arrayBuffer());
   const localImageQuality = inspectImageQuality(buffer, documentFile.size);
+  const recipientBlockHint = await maybeExtractPorRecipientBlock({
+    countryHint,
+    documentTypeHint,
+    documentFile,
+    buffer,
+  });
+
   const extraction = await extractPorWithOpenAI({
     englishName,
     countryHint,
     documentTypeHint,
     documentFile,
     buffer,
+    recipientBlockHint,
   });
   let cleaned = normalizePorDocumentNumberForType(sanitizePorExtraction(extraction), {
     countryHint,
     documentTypeHint,
   });
+  cleaned = mergePorRecipientBlockHint(cleaned, recipientBlockHint, {
+    countryHint,
+    documentTypeHint,
+  });
 
-  if (shouldRetryPorAddressExtraction(cleaned, { countryHint, documentTypeHint })) {
+  if (
+    shouldRetryPorAddressExtraction(cleaned, {
+      countryHint,
+      documentTypeHint,
+      recipientBlockHint,
+    })
+  ) {
     const retryExtraction = await extractPorWithOpenAI({
       englishName,
       countryHint,
@@ -549,17 +591,30 @@ export async function verifyPorDocument({
       documentFile,
       buffer,
       mode: "address_rescue",
+      recipientBlockHint,
     });
-    const retryCleaned = normalizePorDocumentNumberForType(
+    let retryCleaned = normalizePorDocumentNumberForType(
       sanitizePorExtraction(retryExtraction),
       {
         countryHint,
         documentTypeHint,
       },
     );
+    retryCleaned = mergePorRecipientBlockHint(retryCleaned, recipientBlockHint, {
+      countryHint,
+      documentTypeHint,
+    });
     const [currentAddressScore, retryAddressScore] = await Promise.all([
-      scorePorAddressCandidate(cleaned, { countryHint, documentTypeHint }),
-      scorePorAddressCandidate(retryCleaned, { countryHint, documentTypeHint }),
+      scorePorAddressCandidate(cleaned, {
+        countryHint,
+        documentTypeHint,
+        recipientBlockHint,
+      }),
+      scorePorAddressCandidate(retryCleaned, {
+        countryHint,
+        documentTypeHint,
+        recipientBlockHint,
+      }),
     ]);
 
     if (retryAddressScore > currentAddressScore) {
@@ -579,6 +634,7 @@ export async function verifyPorDocument({
       documentTypeHint,
       documentFile,
       buffer,
+      recipientBlockHint,
     });
     const documentNumberRescueCleaned = normalizePorDocumentNumberRescueExtraction(
       documentNumberRescueExtraction,
@@ -594,6 +650,11 @@ export async function verifyPorDocument({
       cleaned = mergePorDocumentNumberExtraction(cleaned, documentNumberRescueCleaned);
     }
   }
+
+  cleaned = await maybeRepairJapanesePorAddressFromPostalCode(cleaned, {
+    countryHint,
+    recipientBlockHint,
+  });
 
   const documentQualityConfidence = mergeDocumentQualityConfidence(
     cleaned.document_quality_confidence,
@@ -1005,19 +1066,23 @@ async function extractPoiWithOpenAI({
       image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
       detail: "high" as const,
     });
-  } else {
-    inputContent.push({
-      type: "input_image" as const,
-      image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
-      detail: "high" as const,
-    });
+  }
 
-    if (
-      backFile &&
-      backBuffer &&
-      mode !== "name_rescue" &&
-      !isJapaneseDriversLicenseRescue
-    ) {
+  inputContent.push({
+    type: "input_image" as const,
+    image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
+    detail: "high" as const,
+  });
+
+  if (
+    backFile &&
+    backBuffer &&
+    mode !== "name_rescue" &&
+    (!isJapaneseDriversLicenseRescue || isJapaneseIndividualNumberRescue)
+  ) {
+    const shouldAppendBackAfterFront = !isJapaneseIndividualNumberRescue;
+
+    if (shouldAppendBackAfterFront) {
       inputContent.push({
         type: "input_image" as const,
         image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
@@ -1042,15 +1107,23 @@ async function extractPoiWithOpenAI({
 async function extractPoiDocumentNumberWithOpenAI({
   countryHint,
   documentTypeHint,
+  detectedDocumentType,
+  localDocumentType,
   frontFile,
   backFile,
   frontBuffer,
   backBuffer,
 }: VerifyPoiInput & {
+  detectedDocumentType?: string;
+  localDocumentType?: string;
   frontBuffer: Buffer;
   backBuffer?: Buffer;
 }): Promise<OpenAiDocumentNumberRescueExtraction> {
-  const typeFingerprint = buildDocumentTypeFingerprint(documentTypeHint);
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    detectedDocumentType ?? "",
+    localDocumentType ?? "",
+  );
   const inputContent: Array<
     | { type: "input_text"; text: string }
     | { type: "input_image"; image_url: string; detail: "high" }
@@ -1060,6 +1133,12 @@ async function extractPoiDocumentNumberWithOpenAI({
       text: [
         `Issued country: ${countryHint.trim()}`,
         `Document type: ${documentTypeHint.trim()}`,
+        detectedDocumentType
+          ? `Detected document type from the first pass: ${detectedDocumentType}`
+          : "",
+        localDocumentType
+          ? `Local OCR document type from the first pass: ${localDocumentType}`
+          : "",
         "Focus only on the document_number field.",
         "Return only document_number, local_document_number, and document_number_confidence.",
         "Do not output any other fields.",
@@ -1074,31 +1153,32 @@ async function extractPoiDocumentNumberWithOpenAI({
     },
   ];
 
-  if (
-    isJapaneseCountryHint(countryHint) &&
-    isJapaneseIndividualNumberCardType(typeFingerprint) &&
+  const prefersBackFirst =
     backFile &&
-    backBuffer
-  ) {
+    backBuffer &&
+    isJapaneseCountryHint(countryHint) &&
+    isJapaneseIndividualNumberCardType(typeFingerprint);
+
+  if (prefersBackFirst && backFile && backBuffer) {
     inputContent.push({
       type: "input_image",
       image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
       detail: "high",
     });
-  } else {
+  }
+
+  inputContent.push({
+    type: "input_image",
+    image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
+    detail: "high",
+  });
+
+  if (backFile && backBuffer && !isJapaneseDriversLicenseType(typeFingerprint) && !prefersBackFirst) {
     inputContent.push({
       type: "input_image",
-      image_url: `data:${frontFile.type};base64,${frontBuffer.toString("base64")}`,
+      image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
       detail: "high",
     });
-
-    if (backFile && backBuffer && !isJapaneseDriversLicenseType(typeFingerprint)) {
-      inputContent.push({
-        type: "input_image",
-        image_url: `data:${backFile.type};base64,${backBuffer.toString("base64")}`,
-        detail: "high",
-      });
-    }
   }
 
   return executeOpenAiParse({
@@ -1110,15 +1190,138 @@ async function extractPoiDocumentNumberWithOpenAI({
   });
 }
 
+function shouldStagePorRecipientBlock({
+  countryHint,
+  documentTypeHint,
+}: {
+  countryHint: string;
+  documentTypeHint: string;
+}) {
+  if (!isJapaneseCountryHint(countryHint)) {
+    return false;
+  }
+
+  const typeFingerprint = buildDocumentTypeFingerprint(documentTypeHint);
+
+  return (
+    isUtilityLikeDocumentType(typeFingerprint) ||
+    isAddressBearingIdDocumentType(typeFingerprint)
+  );
+}
+
+async function maybeExtractPorRecipientBlock({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+  buffer,
+}: Pick<VerifyPorInput, "countryHint" | "documentTypeHint" | "documentFile"> & {
+  buffer: Buffer;
+}): Promise<OpenAiPorRecipientBlockExtraction | null> {
+  if (!shouldStagePorRecipientBlock({ countryHint, documentTypeHint })) {
+    return null;
+  }
+
+  const extraction = await extractPorRecipientBlockWithOpenAI({
+    countryHint,
+    documentTypeHint,
+    documentFile,
+    buffer,
+  });
+
+  const recipientAddressBlock = cleanText(extraction.recipient_address_block);
+  const recipientPostalCode =
+    normalizePostalCode(extraction.recipient_postal_code) ||
+    extractPostalCodeFromText(recipientAddressBlock);
+  const explicitDocumentNumber = normalizeRecipientHintDocumentNumber({
+    value: extraction.explicit_document_number,
+    label: extraction.explicit_document_number_label,
+    countryHint,
+    documentTypeHint,
+  });
+
+  const normalized = {
+    recipient_name_line: cleanText(extraction.recipient_name_line),
+    recipient_address_block: recipientAddressBlock,
+    recipient_postal_code: recipientPostalCode,
+    recipient_country: cleanText(extraction.recipient_country),
+    recipient_local_state: cleanText(extraction.recipient_local_state),
+    recipient_local_city: cleanText(extraction.recipient_local_city),
+    recipient_local_address_1: cleanText(extraction.recipient_local_address_1),
+    recipient_local_address_2: cleanText(extraction.recipient_local_address_2),
+    recipient_state: cleanUppercaseText(extraction.recipient_state),
+    recipient_city: cleanUppercaseText(extraction.recipient_city),
+    recipient_address_1: cleanUppercaseText(extraction.recipient_address_1),
+    recipient_address_2: cleanUppercaseText(extraction.recipient_address_2),
+    explicit_document_number: explicitDocumentNumber,
+    explicit_document_number_label: cleanText(extraction.explicit_document_number_label),
+    confidence: clampConfidence(extraction.confidence),
+    notes: cleanText(extraction.notes),
+  };
+
+  if (
+    !normalized.recipient_name_line &&
+    !normalized.recipient_address_block &&
+    !normalized.recipient_postal_code &&
+    !normalized.explicit_document_number
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+async function extractPorRecipientBlockWithOpenAI({
+  countryHint,
+  documentTypeHint,
+  documentFile,
+  buffer,
+}: Pick<VerifyPorInput, "countryHint" | "documentTypeHint" | "documentFile"> & {
+  buffer: Buffer;
+}) {
+  const userPrompt = [
+    `Issued country: ${countryHint.trim()}`,
+    `Document type: ${documentTypeHint.trim()}`,
+    "Identify the recipient or addressee block first.",
+    "For mailed notices, giro slips, and utility bills, select the block that contains the recipient name, recipient postal code, and recipient residence address.",
+    "The recipient block is usually the block that contains the recipient name together with the recipient postal code and recipient residence address, often followed by 様.",
+    "Prefer the top-left addressee block when it contains postal code, recipient address, and recipient name, even if other company tables or summaries occupy more page area.",
+    "Do not select sender, issuer, office, branch, footer, return, or contact blocks as the recipient block.",
+    "For Japanese address-bearing IDs used as POR, use the visible 住所 block as the recipient residence address block.",
+    "Return the recipient name line, the recipient address block, the visible recipient postal code, and any explicit document-number field with its label when one is clearly visible anywhere on the page.",
+    "Document_number may be outside the recipient block. Only capture it when there is a dedicated label or dedicated number box.",
+    "For utility bills and giro slips, do not treat phone numbers, running line numbers, barcode payloads, or repeated service numbers as document_number unless a dedicated customer/account/reference label explicitly identifies them.",
+    "Do not use phone numbers, postal codes, dates, amounts, barcode payloads, QR payloads, or address digits as explicit_document_number.",
+    "If you can split the recipient address into country, state, city, address_1, and address_2, return those fields too.",
+    "Write notes in Korean.",
+  ].join("\n");
+
+  return executeOpenAiParse({
+    schemaName: "por_recipient_block",
+    inputContent: [
+      { type: "input_text", text: userPrompt },
+      {
+        type: "input_image",
+        image_url: `data:${documentFile.type};base64,${buffer.toString("base64")}`,
+        detail: "high",
+      },
+    ],
+    systemPrompt: buildPorSystemPrompt(countryHint, "recipient_block"),
+    schema: openAiPorRecipientBlockSchema,
+    maxOutputTokens: 450,
+  });
+}
+
 async function extractPorWithOpenAI({
   englishName: _englishName,
   countryHint,
   documentTypeHint,
   documentFile,
   buffer,
+  recipientBlockHint,
   mode = "default",
 }: VerifyPorInput & {
   buffer: Buffer;
+  recipientBlockHint?: OpenAiPorRecipientBlockExtraction | null;
   mode?: "default" | "address_rescue" | "document_number_rescue";
 }) {
   void _englishName;
@@ -1139,8 +1342,56 @@ async function extractPorWithOpenAI({
     "If both recipient and sender addresses are present, extract the recipient or addressee residence address only.",
     "Ignore issuer, office, footer, return, branch, or contact addresses unless they are clearly the recipient address.",
     "For mailed notices or utility slips, prefer the address block closest to the recipient name.",
+    "For utility bills, giro slips, and mailed notices, the recipient/addressee block often contains postal code, recipient address, recipient name, and 様. Prefer that block over issuer summaries, payment tables, or company information boxes.",
+    "If a stage-1 recipient hint is provided, treat it as the primary anchor for name and address extraction unless the document clearly contradicts it.",
+    "For utility-like documents, be conservative with document_number. Leave it blank unless an explicit customer/account/reference/contract label or dedicated number box identifies it.",
     "If the required recipient address is missing or unreadable but there are no other edit artifacts, leave document_integrity_status clean and let the app handle the missing required field.",
   ];
+
+  if (recipientBlockHint) {
+    userPromptLines.push(
+      recipientBlockHint.recipient_name_line
+        ? `Recipient name hint from stage 1: ${recipientBlockHint.recipient_name_line}`
+        : "",
+      recipientBlockHint.recipient_address_block
+        ? `Recipient address block hint from stage 1: ${recipientBlockHint.recipient_address_block}`
+        : "",
+      recipientBlockHint.recipient_postal_code
+        ? `Recipient postal code hint from stage 1: ${recipientBlockHint.recipient_postal_code}`
+        : "",
+      recipientBlockHint.recipient_local_state
+        ? `Recipient local state hint: ${recipientBlockHint.recipient_local_state}`
+        : "",
+      recipientBlockHint.recipient_local_city
+        ? `Recipient local city hint: ${recipientBlockHint.recipient_local_city}`
+        : "",
+      recipientBlockHint.recipient_local_address_1
+        ? `Recipient local address_1 hint: ${recipientBlockHint.recipient_local_address_1}`
+        : "",
+      recipientBlockHint.recipient_local_address_2
+        ? `Recipient local address_2 hint: ${recipientBlockHint.recipient_local_address_2}`
+        : "",
+      recipientBlockHint.recipient_state
+        ? `Recipient standardized state hint: ${recipientBlockHint.recipient_state}`
+        : "",
+      recipientBlockHint.recipient_city
+        ? `Recipient standardized city hint: ${recipientBlockHint.recipient_city}`
+        : "",
+      recipientBlockHint.recipient_address_1
+        ? `Recipient standardized address_1 hint: ${recipientBlockHint.recipient_address_1}`
+        : "",
+      recipientBlockHint.recipient_address_2
+        ? `Recipient standardized address_2 hint: ${recipientBlockHint.recipient_address_2}`
+        : "",
+      recipientBlockHint.explicit_document_number
+        ? `Explicit document-number hint from stage 1: ${recipientBlockHint.explicit_document_number}`
+        : "",
+      recipientBlockHint.explicit_document_number_label
+        ? `Explicit document-number label hint from stage 1: ${recipientBlockHint.explicit_document_number_label}`
+        : "",
+      "Use the recipient hints to anchor extraction. Prefer this addressee block unless the full document clearly contradicts it.",
+    );
+  }
 
   if (mode === "address_rescue") {
     userPromptLines.push(
@@ -1194,8 +1445,10 @@ async function extractPorDocumentNumberWithOpenAI({
   documentTypeHint,
   documentFile,
   buffer,
+  recipientBlockHint,
 }: VerifyPorInput & {
   buffer: Buffer;
+  recipientBlockHint?: OpenAiPorRecipientBlockExtraction | null;
 }): Promise<OpenAiDocumentNumberRescueExtraction> {
   const inputContent = [
     {
@@ -1210,6 +1463,12 @@ async function extractPorDocumentNumberWithOpenAI({
         "Document_number may appear outside the recipient block, but it must come from an explicit number field or label.",
         "On utility bills, giro slips, statements, and mailed notices, never use phone numbers, postal codes, dates, amounts, barcode payloads, QR payloads, or recipient-address digits as document_number.",
         "Use customer/account/reference/contract/document numbers only when a dedicated label or dedicated number box clearly indicates that number.",
+        recipientBlockHint?.explicit_document_number
+          ? `Stage-1 explicit number hint to verify: ${recipientBlockHint.explicit_document_number}`
+          : "",
+        recipientBlockHint?.explicit_document_number_label
+          ? `Stage-1 explicit number label hint: ${recipientBlockHint.explicit_document_number_label}`
+          : "",
       ].join("\n"),
     },
     {
@@ -1227,6 +1486,50 @@ async function extractPorDocumentNumberWithOpenAI({
     maxOutputTokens: 140,
   });
 }
+
+async function normalizeJapanesePorAddressWithOpenAI({
+  postalCode,
+  localState,
+  localCity,
+  localAddress1,
+  localAddress2,
+}: {
+  postalCode: string;
+  localState: string;
+  localCity: string;
+  localAddress1: string;
+  localAddress2: string;
+}): Promise<OpenAiJapaneseAddressNormalizationExtraction> {
+  return executeOpenAiParse({
+    schemaName: "japanese_por_address_normalization",
+    inputContent: [
+      {
+        type: "input_text",
+        text: [
+          "Normalize this Japanese recipient residence address into standardized Latin-script fields.",
+          "Do not perform OCR. Use only the provided local address parts.",
+          "Keep prefecture suffixes such as -KEN, -TO, -DO, or -FU.",
+          "Keep city-level suffixes such as -SHI, -KU, or -GUN when appropriate.",
+          "When the municipality includes a district/town split, keep the district or city-level part in city and move the sub-municipal town block into address_1.",
+          "Keep address_2 for the remaining lower-level area and numeric block.",
+          `Postal code: ${postalCode}`,
+          `Local state: ${localState}`,
+          `Local city: ${localCity}`,
+          `Local address 1: ${localAddress1}`,
+          `Local address 2: ${localAddress2}`,
+          'Example: Local state "熊本県", local city "葦北郡", local address 1 "芦北町", local address 2 "大字白岩318" -> state "KUMAMOTO-KEN", city "ASHIKITA-GUN", address_1 "ASHIKITA-MACHI", address_2 "OAZA SHIRAIWA 318".',
+          'Example: Local state "熊本県", local city "熊本市", local address 1 "北区植木町", local address 2 "今岩318" -> state "KUMAMOTO-KEN", city "KUMAMOTO-SHI", address_1 "KITA-KU UEKI-MACHI", address_2 "IMAIWA 318".',
+          "Write notes in Korean.",
+        ].join("\n"),
+      },
+    ],
+    systemPrompt:
+      "You normalize already-extracted Japanese residence address parts into standardized Latin-script output. Return only JSON matching the schema. Do not add explanations outside JSON.",
+    schema: openAiJapaneseAddressNormalizationSchema,
+    maxOutputTokens: 220,
+  });
+}
+
 async function executeOpenAiParse<TSchema extends z.ZodTypeAny>({
   schemaName,
   inputContent,
@@ -1434,7 +1737,7 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     ].filter(Boolean),
   ).join(" ");
 
-  let cleaned = {
+  const cleaned = {
     document_type: cleanText(extraction.document_type),
     local_document_type: cleanText(extraction.local_document_type),
     document_type_confidence: clampConfidence(extraction.document_type_confidence),
@@ -1517,11 +1820,7 @@ function sanitizePorExtraction(extraction: OpenAiPorExtraction) {
     warnings: uniqueStrings(extraction.warnings.map((warning) => cleanText(warning))),
   };
 
-  if (shouldApplyJapanesePoiHeuristics(cleaned)) {
-    cleaned = normalizeJapanesePoiExtraction(cleaned);
-  }
-
-  return preferOriginalLocalPoiNameScripts(cleaned);
+  return cleaned;
 }
 
 function rebalanceJapanesePorLocalAddress({
@@ -1752,9 +2051,11 @@ function shouldRetryPorAddressExtraction(
   {
     countryHint,
     documentTypeHint,
+    recipientBlockHint,
   }: {
     countryHint: string;
     documentTypeHint: string;
+    recipientBlockHint?: OpenAiPorRecipientBlockExtraction | null;
   },
 ) {
   if (!isJapaneseCountryHint(countryHint)) {
@@ -1769,13 +2070,23 @@ function shouldRetryPorAddressExtraction(
   const quickScore = getPorAddressExtractionScore(extraction);
   const suspiciousAddress =
     hasSenderLikeAddressSignals(extraction) || hasWeakPorAddressEvidence(extraction);
+  const hasRecipientHint = Boolean(
+    recipientBlockHint &&
+      (recipientBlockHint.recipient_address_block ||
+        recipientBlockHint.recipient_postal_code ||
+        recipientBlockHint.recipient_name_line),
+  );
+  const recipientAlignmentScore = scoreRecipientBlockAlignment(
+    extraction,
+    recipientBlockHint ?? null,
+  );
 
   if (isUtilityLikeDocumentType(typeFingerprint)) {
-    return quickScore < 6 || suspiciousAddress;
+    return quickScore < 6 || suspiciousAddress || (hasRecipientHint && recipientAlignmentScore < 3);
   }
 
   if (isAddressBearingIdDocumentType(typeFingerprint)) {
-    return quickScore < 5 || suspiciousAddress;
+    return quickScore < 5 || suspiciousAddress || (hasRecipientHint && recipientAlignmentScore < 2.5);
   }
 
   return false;
@@ -1800,9 +2111,11 @@ async function scorePorAddressCandidate(
   {
     countryHint,
     documentTypeHint,
+    recipientBlockHint,
   }: {
     countryHint: string;
     documentTypeHint: string;
+    recipientBlockHint?: OpenAiPorRecipientBlockExtraction | null;
   },
 ) {
   const typeFingerprint = buildDocumentTypeFingerprint(
@@ -1866,6 +2179,8 @@ async function scorePorAddressCandidate(
     total += extraction.local_full_name ? 1.5 : -1;
     total += extraction.address_notes ? 0.5 : 0;
   }
+
+  total += scoreRecipientBlockAlignment(extraction, recipientBlockHint ?? null);
 
   return total;
 }
@@ -2378,15 +2693,19 @@ function normalizePoiDocumentNumberRescueExtraction(
   {
     countryHint,
     documentTypeHint,
+    detectedDocumentType,
+    localDocumentType,
   }: {
     countryHint: string;
     documentTypeHint: string;
+    detectedDocumentType?: string;
+    localDocumentType?: string;
   },
 ) {
   return normalizePoiDocumentNumberForType(
     {
-      document_type: documentTypeHint,
-      local_document_type: "",
+      document_type: detectedDocumentType || documentTypeHint,
+      local_document_type: localDocumentType || "",
       document_number: cleanDocumentNumberText(extraction.document_number),
       local_document_number: cleanDocumentNumberText(extraction.local_document_number),
       document_number_confidence: clampConfidence(extraction.document_number_confidence),
@@ -2408,9 +2727,11 @@ function normalizePorDocumentNumberForType<
   {
     countryHint,
     documentTypeHint,
+    allowUtilityDocumentNumber = false,
   }: {
     countryHint: string;
     documentTypeHint: string;
+    allowUtilityDocumentNumber?: boolean;
   },
 ) {
   const nextValue = { ...value };
@@ -2439,6 +2760,15 @@ function normalizePorDocumentNumberForType<
 
   if (!isUtilityLikeDocumentType(typeFingerprint)) {
     return nextValue;
+  }
+
+  if (!allowUtilityDocumentNumber) {
+    return {
+      ...nextValue,
+      document_number: "",
+      local_document_number: "",
+      document_number_confidence: 0,
+    };
   }
 
   const standardizedCandidate = normalizePorDocumentNumberCandidate(
@@ -2489,7 +2819,7 @@ function normalizePorDocumentNumberRescueExtraction(
       local_document_number: cleanDocumentNumberText(extraction.local_document_number),
       document_number_confidence: clampConfidence(extraction.document_number_confidence),
     },
-    { countryHint, documentTypeHint },
+    { countryHint, documentTypeHint, allowUtilityDocumentNumber: true },
   );
 }
 
@@ -2825,6 +3155,101 @@ function normalizePorDocumentNumberCandidate(value: string, typeFingerprint: str
   return candidate;
 }
 
+function looksLikeExplicitUtilityDocumentNumberLabel(value: string) {
+  const normalized = normalizeLooseText(value);
+
+  if (!normalized) {
+    return false;
+  }
+
+  const blockedMarkers = [
+    "phone",
+    "tel",
+    "telephone",
+    "postal",
+    "postcode",
+    "zip",
+    "barcode",
+    "qr",
+    "amount",
+    "total amount",
+    "issue date",
+    "transfer day",
+    "contact",
+    "郵便",
+    "電話",
+    "金額",
+    "料金",
+    "発行日",
+    "振替日",
+    "請求年月",
+    "問合せ",
+    "お問い合わせ",
+  ];
+
+  if (blockedMarkers.some((marker) => normalized.includes(normalizeLooseText(marker)))) {
+    return false;
+  }
+
+  const allowedMarkers = [
+    "document number",
+    "customer number",
+    "customer code",
+    "running number",
+    "account number",
+    "account no",
+    "reference number",
+    "contract number",
+    "membership number",
+    "member number",
+    "顧客番号",
+    "お客様番号",
+    "会員番号",
+    "管理番号",
+    "受付番号",
+    "照会番号",
+    "契約番号",
+    "整理番号",
+  ];
+
+  return allowedMarkers.some((marker) =>
+    normalized.includes(normalizeLooseText(marker)),
+  );
+}
+
+function normalizeRecipientHintDocumentNumber({
+  value,
+  label,
+  countryHint,
+  documentTypeHint,
+}: {
+  value: string;
+  label: string;
+  countryHint: string;
+  documentTypeHint: string;
+}) {
+  const typeFingerprint = buildDocumentTypeFingerprint(documentTypeHint);
+  const candidate = cleanDocumentNumberText(value);
+
+  if (!candidate) {
+    return "";
+  }
+
+  if (isJapaneseCountryHint(countryHint) && isJapaneseIndividualNumberCardType(typeFingerprint)) {
+    return extractJapaneseIndividualNumber(candidate);
+  }
+
+  if (isUtilityLikeDocumentType(typeFingerprint)) {
+    if (!looksLikeExplicitUtilityDocumentNumberLabel(label)) {
+      return "";
+    }
+
+    return normalizePorDocumentNumberCandidate(candidate, typeFingerprint);
+  }
+
+  return normalizePorDocumentNumberCandidate(candidate, typeFingerprint);
+}
+
 function scorePoiDocumentNumberCandidate<
   T extends {
     document_type: string;
@@ -2930,6 +3355,551 @@ function shouldClearInferredPoiNationality(value: {
     normalizedDocumentType.includes("license") ||
     normalizedDocumentType.includes("\u904b\u8ee2")
   );
+}
+
+function normalizeRecipientNameLine(value: string) {
+  return cleanText(value).replace(/\s*様$/u, "").trim();
+}
+
+function splitRecipientNameLine(value: string) {
+  const tokens = normalizeRecipientNameLine(value)
+    .split(/[\s　]+/u)
+    .map((token) => cleanText(token))
+    .filter(Boolean);
+
+  if (tokens.length < 2) {
+    return {
+      localLastName: "",
+      localFirstName: "",
+      localFullName: normalizeRecipientNameLine(value),
+    };
+  }
+
+  return {
+    localLastName: tokens[0] ?? "",
+    localFirstName: tokens.slice(1).join(" "),
+    localFullName: tokens.join(" "),
+  };
+}
+
+function buildCurrentPorNameLine(extraction: ReturnType<typeof sanitizePorExtraction>) {
+  const fullName = cleanText(extraction.local_full_name);
+
+  if (fullName) {
+    return normalizeRecipientNameLine(fullName);
+  }
+
+  return normalizeRecipientNameLine(
+    [extraction.local_last_name, extraction.local_first_name].filter(Boolean).join(" "),
+  );
+}
+
+function buildCurrentPorAddressBlock(extraction: ReturnType<typeof sanitizePorExtraction>) {
+  const joined =
+    extraction.local_full_address ||
+    [
+      extraction.local_state,
+      extraction.local_city,
+      extraction.local_address_1,
+      extraction.local_address_2,
+    ]
+      .filter(Boolean)
+      .join("");
+
+  return normalizeJapaneseAddressText(joined);
+}
+
+function scoreRecipientBlockAlignment(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  recipientBlockHint: OpenAiPorRecipientBlockExtraction | null,
+) {
+  if (!recipientBlockHint) {
+    return 0;
+  }
+
+  let score = 0;
+
+  const currentPostal = normalizePostalCode(extraction.postal_code || extraction.local_postal_code);
+  const hintPostal = normalizePostalCode(recipientBlockHint.recipient_postal_code);
+
+  if (currentPostal && hintPostal) {
+    score += currentPostal === hintPostal ? 4 : -4;
+  }
+
+  const currentAddressBlock = buildCurrentPorAddressBlock(extraction);
+  const hintAddressBlock = normalizeJapaneseAddressText(recipientBlockHint.recipient_address_block);
+
+  if (currentAddressBlock && hintAddressBlock) {
+    if (
+      currentAddressBlock.includes(hintAddressBlock) ||
+      hintAddressBlock.includes(currentAddressBlock)
+    ) {
+      score += 5;
+    } else {
+      score -= 5;
+    }
+  }
+
+  const comparisons = [
+    [extraction.local_state, recipientBlockHint.recipient_local_state],
+    [extraction.local_city, recipientBlockHint.recipient_local_city],
+    [extraction.local_address_1, recipientBlockHint.recipient_local_address_1],
+    [extraction.local_address_2, recipientBlockHint.recipient_local_address_2],
+  ] as const;
+
+  for (const [currentValue, hintValue] of comparisons) {
+    const currentText = normalizeJapaneseAddressText(currentValue);
+    const hintText = normalizeJapaneseAddressText(hintValue);
+
+    if (!currentText || !hintText) {
+      continue;
+    }
+
+    if (currentText === hintText) {
+      score += 2;
+    } else if (currentText.includes(hintText) || hintText.includes(currentText)) {
+      score += 1;
+    } else {
+      score -= 2;
+    }
+  }
+
+  const currentName = normalizeLooseText(buildCurrentPorNameLine(extraction));
+  const hintName = normalizeLooseText(normalizeRecipientNameLine(recipientBlockHint.recipient_name_line));
+
+  if (currentName && hintName) {
+    score += currentName === hintName ? 2 : -2;
+  }
+
+  return score;
+}
+
+function mergePorRecipientBlockHint(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  recipientBlockHint: OpenAiPorRecipientBlockExtraction | null,
+  {
+    countryHint,
+    documentTypeHint,
+  }: {
+    countryHint: string;
+    documentTypeHint: string;
+  },
+) {
+  if (!recipientBlockHint) {
+    return extraction;
+  }
+
+  const nextValue = { ...extraction };
+  const typeFingerprint = buildDocumentTypeFingerprint(
+    documentTypeHint,
+    extraction.document_type,
+    extraction.local_document_type,
+  );
+  const hintHasAddress =
+    Boolean(recipientBlockHint.recipient_address_block) ||
+    Boolean(recipientBlockHint.recipient_local_state) ||
+    Boolean(recipientBlockHint.recipient_local_city) ||
+    Boolean(recipientBlockHint.recipient_local_address_1) ||
+    Boolean(recipientBlockHint.recipient_local_address_2);
+  const alignmentScore = scoreRecipientBlockAlignment(extraction, recipientBlockHint);
+  const shouldPreferHint =
+    hintHasAddress &&
+    (hasWeakPorAddressEvidence(extraction) ||
+      hasSenderLikeAddressSignals(extraction) ||
+      alignmentScore < (isUtilityLikeDocumentType(typeFingerprint) ? 3 : 2));
+
+  if (recipientBlockHint.recipient_name_line && !nextValue.local_full_name) {
+    const splitName = splitRecipientNameLine(recipientBlockHint.recipient_name_line);
+    nextValue.local_full_name = splitName.localFullName || nextValue.local_full_name;
+    nextValue.local_full_name_confidence = Math.max(
+      nextValue.local_full_name_confidence,
+      clampConfidence(recipientBlockHint.confidence),
+    );
+
+    if (!nextValue.local_last_name && splitName.localLastName) {
+      nextValue.local_last_name = splitName.localLastName;
+      nextValue.local_last_name_confidence = Math.max(
+        nextValue.local_last_name_confidence,
+        clampConfidence(recipientBlockHint.confidence),
+      );
+    }
+
+    if (!nextValue.local_first_name && splitName.localFirstName) {
+      nextValue.local_first_name = splitName.localFirstName;
+      nextValue.local_first_name_confidence = Math.max(
+        nextValue.local_first_name_confidence,
+        clampConfidence(recipientBlockHint.confidence),
+      );
+    }
+  }
+
+  if (recipientBlockHint.explicit_document_number && !nextValue.document_number) {
+    nextValue.document_number = recipientBlockHint.explicit_document_number;
+    nextValue.local_document_number =
+      recipientBlockHint.explicit_document_number || nextValue.local_document_number;
+    nextValue.document_number_confidence = Math.max(
+      nextValue.document_number_confidence,
+      clampConfidence(averageConfidence([recipientBlockHint.confidence, 0.82])),
+    );
+  }
+
+  if (recipientBlockHint.recipient_postal_code && (!nextValue.postal_code || shouldPreferHint)) {
+    nextValue.postal_code = recipientBlockHint.recipient_postal_code;
+    nextValue.local_postal_code =
+      recipientBlockHint.recipient_postal_code || nextValue.local_postal_code;
+    nextValue.postal_code_confidence = Math.max(
+      nextValue.postal_code_confidence,
+      clampConfidence(averageConfidence([recipientBlockHint.confidence, 0.82])),
+    );
+  }
+
+  if (shouldPreferHint) {
+    const parsedHintAddress = rebalanceJapanesePorLocalAddress({
+      issuedCountry: nextValue.issued_country || countryHint,
+      country: nextValue.country,
+      localCountry: nextValue.local_country,
+      localState: recipientBlockHint.recipient_local_state || nextValue.local_state,
+      localCity: recipientBlockHint.recipient_local_city || nextValue.local_city,
+      localAddress1: recipientBlockHint.recipient_local_address_1 || nextValue.local_address_1,
+      localAddress2: recipientBlockHint.recipient_local_address_2 || nextValue.local_address_2,
+      localFullAddress:
+        recipientBlockHint.recipient_address_block || nextValue.local_full_address,
+    });
+
+    if (recipientBlockHint.recipient_address_block) {
+      nextValue.local_full_address = recipientBlockHint.recipient_address_block;
+      nextValue.local_full_address_confidence = Math.max(
+        nextValue.local_full_address_confidence,
+        clampConfidence(recipientBlockHint.confidence),
+      );
+    }
+
+    if (recipientBlockHint.recipient_local_state) {
+      nextValue.local_state = recipientBlockHint.recipient_local_state;
+      nextValue.state_confidence = Math.max(
+        nextValue.state_confidence,
+        clampConfidence(recipientBlockHint.confidence),
+      );
+    }
+
+    nextValue.local_city =
+      recipientBlockHint.recipient_local_city || parsedHintAddress.localCity || nextValue.local_city;
+    nextValue.local_address_1 =
+      recipientBlockHint.recipient_local_address_1 ||
+      parsedHintAddress.localAddress1 ||
+      nextValue.local_address_1;
+    nextValue.local_address_2 =
+      recipientBlockHint.recipient_local_address_2 ||
+      parsedHintAddress.localAddress2 ||
+      nextValue.local_address_2;
+
+    if (recipientBlockHint.recipient_state) {
+      nextValue.state = recipientBlockHint.recipient_state;
+    } else if (alignmentScore < 0) {
+      nextValue.state = "";
+    }
+
+    if (recipientBlockHint.recipient_city) {
+      nextValue.city = recipientBlockHint.recipient_city;
+    } else if (alignmentScore < 0) {
+      nextValue.city = "";
+    }
+
+    if (recipientBlockHint.recipient_address_1) {
+      nextValue.address_1 = recipientBlockHint.recipient_address_1;
+    } else if (alignmentScore < 0) {
+      nextValue.address_1 = "";
+    }
+
+    if (recipientBlockHint.recipient_address_2) {
+      nextValue.address_2 = recipientBlockHint.recipient_address_2;
+    } else if (alignmentScore < 0) {
+      nextValue.address_2 = "";
+    }
+
+    if (isUtilityLikeDocumentType(typeFingerprint) && recipientBlockHint.explicit_document_number) {
+      nextValue.document_number = recipientBlockHint.explicit_document_number;
+      nextValue.local_document_number =
+        recipientBlockHint.explicit_document_number || nextValue.local_document_number;
+      nextValue.document_number_confidence = Math.max(
+        nextValue.document_number_confidence,
+        clampConfidence(averageConfidence([recipientBlockHint.confidence, 0.82])),
+      );
+    }
+
+    nextValue.address_notes = uniqueStrings(
+      [
+        nextValue.address_notes,
+        recipientBlockHint.notes,
+        "수신자 블록 기준으로 주소를 보정했습니다.",
+      ].filter(Boolean),
+    ).join(" ");
+  }
+
+  return normalizePorDocumentNumberForType(nextValue, {
+    countryHint,
+    documentTypeHint,
+    allowUtilityDocumentNumber: Boolean(recipientBlockHint.explicit_document_number),
+  });
+}
+
+async function maybeRepairJapanesePorAddressFromPostalCode(
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  {
+    countryHint,
+    recipientBlockHint,
+  }: {
+    countryHint: string;
+    recipientBlockHint?: OpenAiPorRecipientBlockExtraction | null;
+  },
+) {
+  if (
+    !isJapaneseCountryHint(countryHint) ||
+    !shouldApplyJapanesePorHeuristics({
+      issuedCountry: extraction.issued_country,
+      country: extraction.country,
+      localCountry: extraction.local_country,
+      localState: extraction.local_state,
+    })
+  ) {
+    return extraction;
+  }
+
+  const postalCode = normalizePostalCode(
+    extraction.postal_code ||
+      extraction.local_postal_code ||
+      recipientBlockHint?.recipient_postal_code ||
+      extractPostalCodeFromText(
+        recipientBlockHint?.recipient_address_block || extraction.local_full_address,
+      ),
+  );
+
+  if (!postalCode) {
+    return extraction;
+  }
+
+  const postalCandidates = await lookupJapanAddressByPostalCode(postalCode);
+
+  if (postalCandidates.length === 0) {
+    return extraction;
+  }
+
+  const bestCandidate = pickBestJapanPostalAddressCandidate(
+    postalCandidates,
+    extraction,
+    recipientBlockHint ?? null,
+  );
+
+  if (!bestCandidate) {
+    return extraction;
+  }
+
+  const repairedLocalAddress = buildJapanesePorAddressFromPostalCandidate(
+    bestCandidate,
+    extraction,
+    recipientBlockHint ?? null,
+  );
+
+  const needsRepair =
+    normalizeJapaneseAddressText(extraction.local_state) !==
+      normalizeJapaneseAddressText(repairedLocalAddress.localState) ||
+    normalizeJapaneseAddressText(extraction.local_city) !==
+      normalizeJapaneseAddressText(repairedLocalAddress.localCity) ||
+    normalizeJapaneseAddressText(extraction.local_address_1) !==
+      normalizeJapaneseAddressText(repairedLocalAddress.localAddress1) ||
+    normalizeJapaneseAddressText(extraction.local_address_2) !==
+      normalizeJapaneseAddressText(repairedLocalAddress.localAddress2) ||
+    normalizePostalCode(extraction.postal_code || extraction.local_postal_code) !== postalCode;
+
+  if (!needsRepair) {
+    return extraction;
+  }
+
+  const normalized = await normalizeJapanesePorAddressWithOpenAI({
+    postalCode,
+    localState: repairedLocalAddress.localState,
+    localCity: repairedLocalAddress.localCity,
+    localAddress1: repairedLocalAddress.localAddress1,
+    localAddress2: repairedLocalAddress.localAddress2,
+  });
+
+  return {
+    ...extraction,
+    postal_code: postalCode,
+    local_postal_code: postalCode,
+    postal_code_confidence: Math.max(extraction.postal_code_confidence, 0.93),
+    local_state: repairedLocalAddress.localState,
+    local_city: repairedLocalAddress.localCity,
+    local_address_1: repairedLocalAddress.localAddress1,
+    local_address_2: repairedLocalAddress.localAddress2,
+    local_full_address: repairedLocalAddress.localFullAddress,
+    local_full_address_confidence: Math.max(
+      extraction.local_full_address_confidence,
+      0.9,
+    ),
+    state: normalized.state || extraction.state,
+    city: normalized.city || extraction.city,
+    address_1: normalized.address_1 || extraction.address_1,
+    address_2: normalized.address_2 || extraction.address_2,
+    state_confidence: Math.max(extraction.state_confidence, normalized.confidence, 0.86),
+    city_confidence: Math.max(extraction.city_confidence, normalized.confidence, 0.86),
+    address_1_confidence: Math.max(
+      extraction.address_1_confidence,
+      normalized.confidence,
+      0.84,
+    ),
+    address_2_confidence: Math.max(
+      extraction.address_2_confidence,
+      normalized.confidence,
+      0.84,
+    ),
+    address_notes: uniqueStrings(
+      [
+        extraction.address_notes,
+        normalized.notes,
+        `수신자 우편번호 ${postalCode} 기준으로 일본 주소를 재보정했습니다.`,
+      ].filter(Boolean),
+    ).join(" "),
+  };
+}
+
+function pickBestJapanPostalAddressCandidate(
+  candidates: Awaited<ReturnType<typeof lookupJapanAddressByPostalCode>>,
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  recipientBlockHint: OpenAiPorRecipientBlockExtraction | null,
+) {
+  const sourceTexts = [
+    recipientBlockHint?.recipient_address_block,
+    extraction.local_full_address,
+    `${extraction.local_state}${extraction.local_city}${extraction.local_address_1}${extraction.local_address_2}`,
+  ]
+    .map((value) => normalizeJapaneseAddressText(value ?? ""))
+    .filter(Boolean);
+
+  let bestCandidate: (typeof candidates)[number] | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    const candidateState = normalizeJapaneseAddressText(candidate.state);
+    const candidateCity = normalizeJapaneseAddressText(candidate.city);
+    const candidateTown = normalizeJapaneseAddressText(candidate.town);
+
+    let score = 0;
+
+    for (const sourceText of sourceTexts) {
+      if (candidateState && sourceText.includes(candidateState)) {
+        score += 2;
+      }
+
+      if (candidateCity && sourceText.includes(candidateCity)) {
+        score += 4;
+      }
+
+      if (candidateTown && sourceText.includes(candidateTown)) {
+        score += 6;
+      }
+
+      const collapsedCity = collapseJapanPostalMunicipality(candidate.city);
+
+      if (collapsedCity && sourceText.includes(normalizeJapaneseAddressText(collapsedCity))) {
+        score += 2;
+      }
+    }
+
+    if (
+      normalizeJapaneseAddressText(extraction.local_state) === candidateState &&
+      candidateState
+    ) {
+      score += 2;
+    }
+
+    if (
+      normalizeJapaneseAddressText(extraction.local_city).includes(candidateCity) &&
+      candidateCity
+    ) {
+      score += 2;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
+}
+
+function buildJapanesePorAddressFromPostalCandidate(
+  candidate: NonNullable<
+    ReturnType<typeof pickBestJapanPostalAddressCandidate>
+  >,
+  extraction: ReturnType<typeof sanitizePorExtraction>,
+  recipientBlockHint: OpenAiPorRecipientBlockExtraction | null,
+) {
+  const sourceAddress =
+    recipientBlockHint?.recipient_address_block ||
+    extraction.local_full_address ||
+    `${candidate.state}${candidate.city}${candidate.town}${extraction.local_address_2}`;
+  const normalizedSource = normalizeJapaneseAddressText(sourceAddress);
+  const withoutPostal = normalizedSource.replace(/^〒?\d{3}[-－ーｰ]?\d{4}/u, "");
+  let remainder = withoutPostal;
+
+  for (const token of [candidate.state, candidate.city, candidate.town]) {
+    const normalizedToken = normalizeJapaneseAddressText(token);
+
+    if (normalizedToken && remainder.startsWith(normalizedToken)) {
+      remainder = remainder.slice(normalizedToken.length);
+    }
+  }
+
+  const municipalitySplit = splitJapanPostalMunicipality(candidate.city);
+  const localCity = municipalitySplit.city;
+  let localAddress1 = municipalitySplit.address1 || "";
+  let localAddress2 = "";
+  const normalizedTown = cleanText(candidate.town);
+
+  if (!localAddress1) {
+    localAddress1 = normalizedTown;
+    localAddress2 = cleanText(remainder);
+  } else {
+    localAddress2 = cleanText(`${normalizedTown}${remainder}`);
+  }
+
+  if (!localAddress2) {
+    localAddress2 = cleanText(extraction.local_address_2);
+  }
+
+  return {
+    localState: cleanText(candidate.state),
+    localCity: cleanText(localCity) || cleanText(extraction.local_city),
+    localAddress1: cleanText(localAddress1) || cleanText(extraction.local_address_1),
+    localAddress2: cleanText(localAddress2),
+    localFullAddress: cleanText(
+      `${candidate.state}${candidate.city}${candidate.town}${remainder}`,
+    ),
+  };
+}
+
+function splitJapanPostalMunicipality(city: string) {
+  const normalizedCity = cleanText(city);
+  const districtMatch = normalizedCity.match(/^(.+郡)(.+[町村])$/u);
+
+  if (districtMatch) {
+    return {
+      city: cleanText(districtMatch[1] ?? ""),
+      address1: cleanText(districtMatch[2] ?? ""),
+    };
+  }
+
+  return {
+    city: normalizedCity,
+    address1: "",
+  };
+}
+
+function collapseJapanPostalMunicipality(city: string) {
+  const split = splitJapanPostalMunicipality(city);
+  return cleanText(`${split.city}${split.address1}`);
 }
 
 function parseJapaneseRecipientAddress({

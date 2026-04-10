@@ -130,8 +130,42 @@ export const openAiDocumentNumberRescueSchema = z.object({
   document_number_confidence: boundedConfidence,
 });
 
+export const openAiJapaneseAddressNormalizationSchema = z.object({
+  state: blankString,
+  city: blankString,
+  address_1: blankString,
+  address_2: blankString,
+  confidence: boundedConfidence,
+  notes: blankString,
+});
+
+export const openAiPorRecipientBlockSchema = z.object({
+  recipient_name_line: blankString,
+  recipient_address_block: blankString,
+  recipient_postal_code: blankString,
+  recipient_country: blankString,
+  recipient_local_state: blankString,
+  recipient_local_city: blankString,
+  recipient_local_address_1: blankString,
+  recipient_local_address_2: blankString,
+  recipient_state: blankString,
+  recipient_city: blankString,
+  recipient_address_1: blankString,
+  recipient_address_2: blankString,
+  explicit_document_number: blankString,
+  explicit_document_number_label: blankString,
+  confidence: boundedConfidence,
+  notes: blankString,
+});
+
 export type OpenAiPoiExtraction = z.infer<typeof openAiPoiExtractionSchema>;
 export type OpenAiPorExtraction = z.infer<typeof openAiPorExtractionSchema>;
 export type OpenAiDocumentNumberRescueExtraction = z.infer<
   typeof openAiDocumentNumberRescueSchema
+>;
+export type OpenAiJapaneseAddressNormalizationExtraction = z.infer<
+  typeof openAiJapaneseAddressNormalizationSchema
+>;
+export type OpenAiPorRecipientBlockExtraction = z.infer<
+  typeof openAiPorRecipientBlockSchema
 >;

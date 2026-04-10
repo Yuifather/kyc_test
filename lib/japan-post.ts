@@ -28,7 +28,19 @@ interface PostalCodeLookupResult {
   warning?: string;
 }
 
-let japanPostDataPromise: Promise<Map<string, Set<string>>> | undefined;
+export interface JapanPostAddressLookupResult {
+  postalCode: string;
+  state: string;
+  city: string;
+  town: string;
+}
+
+interface JapanPostData {
+  postalMap: Map<string, Set<string>>;
+  reversePostalMap: Map<string, JapanPostAddressLookupResult[]>;
+}
+
+let japanPostDataPromise: Promise<JapanPostData> | undefined;
 
 export async function lookupJapanPostalCode({
   issuedCountry,
@@ -57,7 +69,7 @@ export async function lookupJapanPostalCode({
     };
   }
 
-  const postalMap = await loadJapanPostPostalMap();
+  const { postalMap } = await loadJapanPostPostalMap();
   const postalCodes = new Set<string>();
 
   for (const cityCandidate of cityCandidates) {
@@ -106,6 +118,17 @@ async function loadJapanPostPostalMap() {
   return japanPostDataPromise;
 }
 
+export async function lookupJapanAddressByPostalCode(postalCode: string) {
+  const normalizedPostalCode = formatPostalCode(postalCode);
+
+  if (!normalizedPostalCode) {
+    return [] satisfies JapanPostAddressLookupResult[];
+  }
+
+  const { reversePostalMap } = await loadJapanPostPostalMap();
+  return reversePostalMap.get(normalizedPostalCode) ?? [];
+}
+
 async function fetchAndBuildPostalMap() {
   const response = await fetch(JAPAN_POST_ZIP_URL, {
     headers: {
@@ -129,6 +152,7 @@ async function fetchAndBuildPostalMap() {
 
   const csvText = strFromU8(csvEntry[1]);
   const postalMap = new Map<string, Set<string>>();
+  const reversePostalMap = new Map<string, JapanPostAddressLookupResult[]>();
 
   for (const line of csvText.split(/\r?\n/)) {
     if (!line.trim()) {
@@ -154,9 +178,21 @@ async function fetchAndBuildPostalMap() {
     const existing = postalMap.get(key) ?? new Set<string>();
     existing.add(postalCode);
     postalMap.set(key, existing);
+
+    const reverseExisting = reversePostalMap.get(postalCode) ?? [];
+    reverseExisting.push({
+      postalCode,
+      state,
+      city,
+      town,
+    });
+    reversePostalMap.set(postalCode, reverseExisting);
   }
 
-  return postalMap;
+  return {
+    postalMap,
+    reversePostalMap,
+  };
 }
 
 function shouldUseJapanPostLookup({
